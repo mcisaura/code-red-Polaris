@@ -1,8 +1,6 @@
 # code-red-Polaris
 Hackathon repo for Code Red 2026 for team Polaris
 
-**Live: [airdeck.design](https://airdeck.design)**
-
 ## AirDeck
 
 DJ with your hands in the browser, using your webcam (MediaPipe hand tracking + Web Audio).
@@ -61,9 +59,7 @@ so skipping back and forth is instant.
 
 ### Live site
 
-AirDeck runs at https://airdeck.design on a Vultr server (Caddy for HTTPS in front of `server.py`). The server checks
-`main` every minute and deploys new commits automatically, so a push to `main` is live within about a minute. Songs in
-`music/` and `downloads/` and the server's `.env` are not in git and survive deploys.
+AirDeck was hosted at airdeck.design during the hackathon. That server has been shut down, so run it locally as above.
 
 ### Song library
 
