@@ -259,12 +259,17 @@ export function analyzeTempo(buffer) {
     const w = Math.exp(-0.5 * (Math.log2(bpm / 120) / 0.6) ** 2);
     if (s * w > best) { best = s * w; bestLag = lag; }
   }
+  // No lag repeats any onset (silence, a single hit): there is no tempo to find.
+  if (!(bestLag > 0)) return { bpm: 120, first: 0 };
   const rough = (fps * 60) / bestLag;
+  if (!Number.isFinite(rough) || rough <= 0) return { bpm: 120, first: 0 };
 
   // 3. Fine tempo + phase
   const at = (x) => { const i = x | 0, f = x - i; return i + 1 < frames ? onset[i] + (onset[i + 1] - onset[i]) * f : 0; };
   let fine = { score: -1, bpm: rough, phase: 0 };
-  for (let bpm = rough - 1.5; bpm <= rough + 1.5; bpm += 0.01) {
+  const fineSteps = 300; // 0.01 BPM apart across rough ± 1.5 BPM; a fixed count always ends
+  for (let k = 0; k <= fineSteps; k += 1) {
+    const bpm = rough - 1.5 + k * 0.01;
     const period = (fps * 60) / bpm;
     for (let ph = 0; ph < period; ph += 1) {
       let s = 0;

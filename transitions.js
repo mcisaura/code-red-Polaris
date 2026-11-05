@@ -42,11 +42,14 @@ const sleep = (ms) => new Promise((resolve) => setTimeout(resolve, ms));
 
 // A tempo ratio folded into 0.71–1.41, so half and double time count as the same tempo.
 function fold(ratio) {
+  if (!Number.isFinite(ratio) || ratio <= 0) return 1; // no usable tempo: treat as the same
   while (ratio > Math.SQRT2) ratio /= 2;
   while (ratio < Math.SQRT1_2) ratio *= 2;
   return ratio;
 }
-const trusted = (detected, expected) => !expected || Math.abs(fold(detected / expected) - 1) <= tempoTolerance;
+const trusted = (detected, expected) => !expected || (
+  Number.isFinite(detected) && detected > 0 && Math.abs(fold(detected / expected) - 1) <= tempoTolerance
+);
 
 // Where a song's music starts and where its ending fades out (seconds), from its level
 // in half-second steps.
