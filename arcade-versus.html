@@ -7,7 +7,7 @@
 <style>
 /* Shared landing-page look for the Snake mockups: Nunito, white glass, glossy pills, orbs. */
 * { box-sizing: border-box; }
-body { margin: 0; height: 100vh; overflow: hidden; font-family: 'Nunito', sans-serif; color: #0d3557; -webkit-font-smoothing: antialiased; }
+body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction: column; font-family: 'Nunito', sans-serif; color: #0d3557; -webkit-font-smoothing: antialiased; }
 .glass { background: linear-gradient(180deg, rgba(255,255,255,.88), rgba(255,255,255,.62)); border: 1px solid #fff;
   box-shadow: 0 14px 38px rgba(18,92,160,.18), inset 0 1px 0 #fff, inset 0 -1px 0 rgba(120,180,225,.35); backdrop-filter: blur(16px) saturate(1.5); }
 .pill { position: relative; overflow: hidden; display: inline-flex; align-items: center; justify-content: center; gap: 8px; min-height: 42px; padding: 0 20px; border-radius: 999px; font: 800 15px/1 'Nunito'; }
@@ -51,8 +51,8 @@ body { margin: 0; height: 100vh; overflow: hidden; font-family: 'Nunito', sans-s
     /* Tighter: the logo is just the AirDeck orb (it still goes home). */
     header .logoText { position: absolute; width: 1px; height: 1px; overflow: hidden; clip-path: inset(50%); }
   }
-  @media (max-width: 1120px) {
-    /* Not enough room for one row: the carousel gets its own, still centered. */
+  @media (max-width: 1600px) {
+    /* Not enough room for one row (each side needs ~540px for its links): the carousel gets its own row, still centered. */
     header { grid-template-columns: minmax(0, 1fr) auto; border-radius: 28px; }
     header .title { grid-column: 1 / -1; grid-row: 2; justify-self: center; }
   }
@@ -80,7 +80,7 @@ body { margin: 0; height: 100vh; overflow: hidden; font-family: 'Nunito', sans-s
   .dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(120,180,225,.45); }
   .dots span.on { background: #1e95e3; width: 22px; border-radius: 4px; }
 
-  main { display: grid; grid-template-columns: 290px 1fr 290px; gap: 20px; padding: 16px 24px; height: calc(100vh - 90px); }
+  main { display: grid; grid-template-columns: 290px 1fr 290px; gap: 20px; padding: 16px 24px; flex: 1 1 auto; min-height: 0; }
   .side { border-radius: 28px; padding: 18px; display: flex; flex-direction: column; gap: 14px; min-height: 0; }
   .tag { display: flex; align-items: center; gap: 12px; }
   .tag .orb { width: 52px; height: 52px; font-size: 18px; }
@@ -151,6 +151,21 @@ body { margin: 0; height: 100vh; overflow: hidden; font-family: 'Nunito', sans-s
   .overlay .count { font-size: 140px; font-weight: 900; color: #d9700f; line-height: 1; }
   .overlay .pill { margin-top: 22px; min-height: 56px; padding: 0 34px; font-size: 20px; }
   .overlay .keys { margin-top: 14px; font-size: 13px; color: #5a7fa0; }
+
+  /* Phones and narrow screens: one column, the board first and the two player panels below it, and the page scrolls. */
+  @media (max-width: 800px) {
+    html, body { height: auto; min-height: 100vh; overflow: auto; }
+    header { grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 10px 10px 0; padding: 8px 10px; border-radius: 24px; }
+    header .zone { flex-wrap: wrap; justify-content: center; }
+    header .title { grid-column: 1; grid-row: auto; justify-self: stretch; justify-content: center; }
+    header .title .name { min-width: 0; }
+    #status { flex: 1 1 100%; white-space: normal; text-align: center; }
+    main { grid-template-columns: minmax(0, 1fr); flex: none; padding: 12px 10px 18px; gap: 14px; }
+    .center { order: -1; }
+    .board { flex: none; height: 110vw; max-height: 640px; }
+    .overlay h2 { font-size: 34px; }
+    .overlay .count { font-size: 110px; }
+  }
 </style>
 </head>
 <body>
@@ -186,8 +201,6 @@ body { margin: 0; height: 100vh; overflow: hidden; font-family: 'Nunito', sans-s
 <video id="video" playsinline muted hidden></video>
 
 <script type="module">
-import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
-
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 const $ = (id) => document.getElementById(id);
@@ -196,19 +209,24 @@ const $ = (id) => document.getElementById(id);
 const POINT_MIN = 0.55;       // index finger length / palm size needed to count as "pointing"
 const HEIGHT_BOTTOM = 0.85;   // palm y (0 top … 1 bottom) that maps to paddle at the bottom
 const HEIGHT_TOP = 0.2;       // … and to the top
-const KEY_HOLD = 1.5;         // seconds a key press overrides the hand
 
 // ---- Input: one entry per player, filled by the hand tracker or the keyboard -------
 // dir: "u" | "d" | "l" | "r" | null · height: 0 (bottom) … 1 (top)
-// tip: index fingertip in board space 0…1 · gesture: "rock" | "paper" | "scissors" | null
+// tip: camera index fingertip in board space 0…1 (null without a hand)
+// gesture: camera "rock" | "paper" | "scissors" (null without a hand)
+// held: arrow keys currently down · cursor: keyboard fingertip (used while a key is down)
+// keyGesture: gesture typed on the keyboard, cleared after each Hand Duel throw
 const input = { 1: blankInput(), 2: blankInput() };
-function blankInput() { return { present: false, dir: null, height: 0.5, tip: null, gesture: null, lm: null, keyAt: -99 }; }
+function blankInput() { return { present: false, dir: null, height: 0.5, tip: null, gesture: null, lm: null, held: [], cursor: { x: 0.5, y: 0.5 }, keyGesture: null }; }
 
 // ---- Hand tracking -----------------------------------------------------------------
 const video = $("video");
 let landmarker = null, camOn = false, lastVideoTime = -1;
 
+// MediaPipe is imported here, not at the top of the page, so a blocked CDN fails this call
+// (caught below) and the rest of the page, keyboard play included, still runs.
 async function loadModel() {
+  const { HandLandmarker, FilesetResolver } = await import("https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14");
   const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
   const options = (delegate) => ({
     baseOptions: { modelAssetPath: MODEL_URL, delegate },
@@ -259,8 +277,11 @@ function readHand(lm, p) {
   return { dir, height, tip, gesture, lm: m };
 }
 
+// Camera data is dropped as soon as its source is gone (no camera, or no hand), so it never outlives that.
+function dropHand(p) { Object.assign(input[p], { present: false, lm: null, dir: null, tip: null, gesture: null }); }
 function track(now) {
-  if (!camOn || !landmarker || video.readyState < 2 || video.currentTime === lastVideoTime) return;
+  if (!camOn || !landmarker || video.readyState < 2) { dropHand(1); dropHand(2); return; }
+  if (video.currentTime === lastVideoTime) return;
   lastVideoTime = video.currentTime;
   const res = landmarker.detectForVideo(video, now);
   const seen = { 1: null, 2: null };
@@ -270,12 +291,11 @@ function track(now) {
   }
   for (const p of [1, 2]) {
     const inp = input[p];
-    inp.present = !!seen[p];
-    inp.lm = null;
-    if (!seen[p]) { if (clock - inp.keyAt >= KEY_HOLD) { inp.tip = null; inp.gesture = null; } continue; }
+    if (!seen[p]) { dropHand(p); continue; }
     const h = readHand(seen[p], p);
+    inp.present = true;
     inp.lm = h.lm;
-    if (clock - inp.keyAt < KEY_HOLD) continue;   // keyboard has priority for a moment
+    if (isHeld(p)) continue;   // a key held down has priority over the hand
     inp.height = inp.height * 0.6 + h.height * 0.4;
     inp.tip = h.tip;
     if (h.dir) inp.dir = h.dir;
@@ -284,26 +304,38 @@ function track(now) {
 }
 
 // ---- Keyboard fallback -----------------------------------------------------------
+// Keys count only while they are held. An arrow key steers its player and moves a keyboard
+// fingertip (Bubble Pop uses it) until it is released. A gesture key sets the throw, which
+// Hand Duel reads once and then clears.
 const KEYS = {
   w: [1, "u"], s: [1, "d"], a: [1, "l"], d: [1, "r"],
   arrowup: [2, "u"], arrowdown: [2, "d"], arrowleft: [2, "l"], arrowright: [2, "r"],
   1: [1, "rock"], 2: [1, "paper"], 3: [1, "scissors"], 8: [2, "rock"], 9: [2, "paper"], 0: [2, "scissors"],
 };
+const isHeld = (p) => input[p].held.length > 0;
+const heldKeyDir = (p) => { const h = input[p].held; return h.length ? KEYS[h[h.length - 1]][1] : null; };
+const tipOf = (p) => (isHeld(p) ? input[p].cursor : input[p].tip);   // keyboard cursor while a key is down, else the camera's fingertip
+const gestureOf = (p) => input[p].gesture || input[p].keyGesture;
+function clearHeld() { for (const p of [1, 2]) input[p].held = []; }
 addEventListener("keydown", (e) => {
   const k = e.key.toLowerCase();
   if (k === " ") { e.preventDefault(); overlayAction(); return; }
   const m = KEYS[k]; if (!m) return;
   e.preventDefault();
   const [p, v] = m, inp = input[p];
-  inp.keyAt = clock;
   if (v.length === 1) {
-    inp.dir = v;
+    if (!inp.held.includes(k)) inp.held.push(k);
     if (v === "u") inp.height = Math.min(1, inp.height + 0.12);
     if (v === "d") inp.height = Math.max(0, inp.height - 0.12);
-    const t = inp.tip || { x: 0.5, y: 0.5 };
-    inp.tip = { x: Math.min(1, Math.max(0, t.x + (v === "r" ? .06 : v === "l" ? -.06 : 0))), y: Math.min(1, Math.max(0, t.y + (v === "d" ? .06 : v === "u" ? -.06 : 0))) };
-  } else inp.gesture = v;
+    const t = inp.cursor;
+    inp.cursor = { x: Math.min(1, Math.max(0, t.x + (v === "r" ? .06 : v === "l" ? -.06 : 0))), y: Math.min(1, Math.max(0, t.y + (v === "d" ? .06 : v === "u" ? -.06 : 0))) };
+  } else inp.keyGesture = v;
 });
+addEventListener("keyup", (e) => {
+  const k = e.key.toLowerCase(), m = KEYS[k];
+  if (m) input[m[0]].held = input[m[0]].held.filter(x => x !== k);
+});
+addEventListener("blur", clearHeld);
 
 // ---- Little sounds -----------------------------------------------------------------
 let actx = null;
@@ -373,6 +405,13 @@ const music = {
     }
   },
 };
+
+// The chiptune plays only while the game runs: music on, not paused, and past the idle screen.
+// It starts again on resume, so pausing never leaves it going (and it never starts while paused).
+function musicSync() {
+  if (!music.on || paused) music.stop();
+  else if (state.phase !== "idle") music.start();
+}
 
 // ---- Icons -------------------------------------------------------------------------
 // Rounded line icons on a 24×24 grid, used as inline SVG in the UI and as Path2D on the board.
@@ -497,11 +536,11 @@ const rand = (a, b) => a + Math.random() * (b - a);
 const aspect = () => W / H || 1.6;
 const ANG = { u: -Math.PI / 2, d: Math.PI / 2, l: Math.PI, r: 0 };
 function steer(h, p, dt, rate) {
-  const inp = input[p];
+  const key = heldKeyDir(p);
   let want = null;
-  if (clock - inp.keyAt < KEY_HOLD && inp.dir) want = ANG[inp.dir];
-  else if (inp.tip) {
-    const dx = inp.tip.x * aspect() - h.x, dy = inp.tip.y - h.y;
+  if (key) want = ANG[key];                       // an arrow key held down steers; released, it stops steering
+  else if (input[p].tip) {                        // camera fingertip only: no camera means no steering target
+    const dx = input[p].tip.x * aspect() - h.x, dy = input[p].tip.y - h.y;
     if (Math.hypot(dx, dy) > 0.03) want = Math.atan2(dy, dx);
   }
   if (want === null) return;
@@ -543,7 +582,7 @@ function head(h, p, r, alpha = 1) {
 function drawTips(alpha) {
   g.globalAlpha = alpha; g.textAlign = "center";
   for (const p of [1, 2]) {
-    const t = input[p].tip; if (!t || clock - input[p].keyAt < KEY_HOLD) continue;
+    const t = tipOf(p); if (!t) continue;
     g.strokeStyle = PCOL[p]; g.lineWidth = 6; g.beginPath(); g.arc(t.x * W, t.y * H, H * .03, 0, 6.28); g.stroke();
     g.fillStyle = "#fff"; g.beginPath(); g.arc(t.x * W, t.y * H, H * .011, 0, 6.28); g.fill(); g.stroke();
     g.fillStyle = PCOL[p]; g.font = `900 ${H * .025}px Nunito`; g.fillText("P" + p, t.x * W, t.y * H - H * .045);
@@ -720,7 +759,7 @@ const pop = {
     this.b = this.b.filter(b => b.y > -0.1);
     const A = W / H;
     for (const p of [1, 2]) {
-      const t = input[p].tip; if (!t) continue;
+      const t = tipOf(p); if (!t) continue;
       for (let i = this.b.length - 1; i >= 0; i--) {
         const b = this.b[i];
         if (Math.hypot((t.x - b.x) * A, t.y - b.y) < b.r * 1.15) {
@@ -754,13 +793,16 @@ const duel = {
   id: "duel", icon: "hand", orb: "sunny", name: "Hand Duel", unit: "WINS", rule: "Rock, paper or scissors on beat 4",
   help: "Count along: 1, 2, 3… and <b>show rock, paper or scissors on 4</b>. Hold it still for a moment. <b>First to 3 wins.</b>",
   target: 3, beat: 0.6,
-  init() { this.t = 0; this.lastBeat = -1; this.shown = null; this.result = ""; this.draws = this.draws || 0; },
+  init() {
+    this.t = 0; this.lastBeat = -1; this.shown = null; this.result = ""; this.draws = this.draws || 0;
+    for (const p of [1, 2]) { input[p].keyGesture = null; input[p].gesture = null; }   // each throw starts empty
+  },
   update(dt) {
     this.t += dt;
     const b = Math.floor(this.t / this.beat);
     if (b !== this.lastBeat && b < 4) beep(b === 3 ? 880 : 440, 0.1); this.lastBeat = b;
     if (!this.shown && this.t >= this.beat * 4.5) {    // read the hands half a beat after "4"
-      const a = input[1].gesture, c = input[2].gesture;
+      const a = gestureOf(1), c = gestureOf(2);
       this.shown = { 1: a, 2: c };
       this.photo = { 1: handPhoto(1), 2: handPhoto(2) };
       const beats = { rock: "scissors", paper: "rock", scissors: "paper" };
@@ -834,7 +876,7 @@ function selectGame(i) {
   resetMatch();
 }
 function resetMatch() {
-  paused = false; pauseLabel();
+  paused = false; pauseLabel(); music.stop();   // back on the idle screen: silent until Start
   FX = [];
   Object.assign(state, { phase: "idle", score: { 1: 0, 2: 0 }, rounds: { 1: 0, 2: 0 }, totals: { 1: 0, 2: 0 }, round: 1, winner: 0 });
   state.game.best = 0; state.game.draws = 0;
@@ -842,9 +884,9 @@ function resetMatch() {
   buildSides(); showOverlay();
 }
 function startRound() {
-  music.start();
   state.score = { 1: 0, 2: 0 }; state.game.init(); state.timeLeft = state.game.roundTime || 0;
   state.phase = "countdown"; state.count = 3; beep(440);
+  musicSync();
   showOverlay();
 }
 function endRound() {
@@ -908,9 +950,12 @@ function setHTML(id, html) { if (lastHTML[id] !== html) { lastHTML[id] = html; $
 function widgetHTML(p) {
   const inp = input[p], gm = state.game;
   if (gm.widget === "pointer") {
-    const t = inp.tip, keys = clock - inp.keyAt < KEY_HOLD;
-    return `<div><div class="mini">${t && !keys ? `<span class="dot" style="left:${6 + t.x * 88}%;top:${8 + t.y * 84}%"></span>` : ""}</div>
-      <p class="center-note">${keys ? "Steering with the <b>keyboard</b>" : t ? "It <b>follows your finger</b>" : "Point with your <b>index finger</b>"}</p></div>`;
+    const t = tipOf(p), keys = isHeld(p);
+    const hint = keys ? "Steering with the <b>keyboard</b>"
+      : !camOn ? `Camera off: hold <b>${p === 1 ? "W A S D" : "the arrow keys"}</b>`
+      : t ? "It <b>follows your finger</b>" : "Point with your <b>index finger</b>";
+    return `<div><div class="mini">${t ? `<span class="dot" style="left:${6 + t.x * 88}%;top:${8 + t.y * 84}%"></span>` : ""}</div>
+      <p class="center-note">${hint}</p></div>`;
   }
   if (gm.widget === "dpad") {
     const k = (c, t) => `<span class="key ${c}${inp.dir === c ? " on" : ""}">${t}</span>`;
@@ -927,8 +972,10 @@ function widgetHTML(p) {
     return `<div><div class="ring" style="background:conic-gradient(${col} 0 ${Math.min(100, c * 12)}%, rgba(120,180,225,.25) 0)"><div><b>×${c}</b><span>combo</span></div></div>
       <p class="center-note"><b>Index finger</b> pops ${p === 1 ? "aqua" : "lime"} bubbles</p></div>`;
   }
-  return `<div><div class="gest">${["rock", "paper", "scissors"].map(n => `<span class="key${n === inp.gesture ? " on" : ""}">${ic(n, 30, 2)}<small>${n}</small></span>`).join("")}</div>
-    <p class="center-note">${inp.gesture ? `Showing <b>${inp.gesture}</b>` : "Show your hand"}</p></div>`;
+  const gs = gestureOf(p);
+  const hint = gs ? `Showing <b>${gs}</b>` : camOn ? "Show your hand" : `Press <b>${p === 1 ? "1 2 3" : "8 9 0"}</b>`;
+  return `<div><div class="gest">${["rock", "paper", "scissors"].map(n => `<span class="key${n === gs ? " on" : ""}">${ic(n, 30, 2)}<small>${n}</small></span>`).join("")}</div>
+    <p class="center-note">${hint}</p></div>`;
 }
 function updateSides() {
   for (const p of [1, 2]) {
@@ -981,7 +1028,7 @@ function drawCams() {
 let last = performance.now();
 const schedule = requestAnimationFrame;
 function loop(now) {
-  const dt = Math.min(0.05, (now - last) / 1000); last = now;
+  const dt = Math.min(0.1, (now - last) / 1000); last = now;
   track(now);
   if (!paused) {
     clock += dt;
@@ -990,8 +1037,12 @@ function loop(now) {
       if (state.count <= 0) { state.phase = "playing"; beep(880, 0.15); showOverlay(); }
       else if (Math.ceil(state.count) !== before) { beep(440); $("overlay").querySelector(".count").textContent = Math.ceil(state.count); }
     } else if (state.phase === "playing") {
-      state.game.update(dt);
-      if (state.game.roundTime && state.phase === "playing") { state.timeLeft -= dt; if (state.timeLeft <= 0) { state.timeLeft = 0; endRound(); } }
+      // A slow frame (up to 0.1 s) runs as steps of at most 0.05 s, so fast heads and balls cannot skip past each other.
+      const steps = Math.ceil(dt / 0.05), h = dt / steps;
+      for (let i = 0; i < steps && state.phase === "playing"; i++) {
+        state.game.update(h);
+        if (state.game.roundTime && state.phase === "playing") { state.timeLeft -= h; if (state.timeLeft <= 0) { state.timeLeft = 0; endRound(); } }
+      }
     }
   }
   state.game.draw();
@@ -1011,16 +1062,23 @@ const pauseLabel = () => {
   $("pauseBtn").setAttribute("aria-label", label);
   $("pauseBtn").title = label;
 };
-$("pauseBtn").onclick = () => { paused = !paused; pauseLabel(); if (paused) music.stop(); else music.start(); };
+$("pauseBtn").onclick = () => { paused = !paused; pauseLabel(); musicSync(); };
 const musicLabel = () => {
   $("musicBtn").innerHTML = ic(music.on ? "music" : "mute", 18, 2.4);
   $("musicBtn").setAttribute("aria-pressed", music.on);
   $("musicBtn").setAttribute("aria-label", "Music");
   $("musicBtn").title = music.on ? "Music on" : "Music off";
 };
-$("musicBtn").onclick = () => { music.on = !music.on; if (music.on) music.start(); else music.stop(); musicLabel(); };
+$("musicBtn").onclick = () => { music.on = !music.on; musicSync(); musicLabel(); };
 musicLabel();
 pauseLabel();
+// Like AirMix: leaving the tab pauses a running game and stops its music (it does not resume by itself).
+document.addEventListener("visibilitychange", () => {
+  if (document.hidden) {
+    clearHeld(); music.stop();
+    if (!paused && (state.phase === "countdown" || state.phase === "playing")) { paused = true; pauseLabel(); }
+  } else musicSync();
+});
 for (const el of document.querySelectorAll("[data-ic]")) el.insertAdjacentHTML("afterbegin", ic(el.dataset.ic, 18, 2.6));
 addEventListener("resize", fit);
 

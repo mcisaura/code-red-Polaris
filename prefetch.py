@@ -18,6 +18,9 @@ MUSIC = server.ROOT / "music"
 
 
 def main():
+    if any(arg in ("-h", "--help") for arg in sys.argv[1:]):
+        print(__doc__.strip())
+        return
     library = json.loads((server.ROOT / "library.json").read_text(encoding="utf-8"))["songs"]
     MUSIC.mkdir(exist_ok=True)
     failed = 0

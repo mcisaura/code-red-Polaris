@@ -13,19 +13,23 @@ Requires yt-dlp (pip install -U "yt-dlp[default]" or brew install yt-dlp).
 API keys are read from environment variables and never sent to the browser.
 """
 
+import contextlib
+import errno
 import hashlib
+import http.client
 import json
 import os
 import re
 import shutil
 import subprocess
 import sys
+import tempfile
 import threading
 import urllib.error
 import urllib.request
 from http.server import SimpleHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
-from urllib.parse import parse_qs, urlparse, unquote
+from urllib.parse import parse_qs, urlparse, urlsplit, unquote
 
 ROOT = Path(__file__).parent
 
@@ -33,10 +37,20 @@ ROOT = Path(__file__).parent
 def load_env_file(path):
     """Settings from a local .env file (KEY=value per line, # for comments), so the API
     keys survive restarts and new windows. Anything already set in the environment wins.
-    The file is gitignored: keys never get committed."""
+    The file is gitignored: keys never get committed. Warnings never show its contents."""
     if not path.exists():
         return
-    for line in path.read_text(encoding="utf-8").splitlines():
+    if not path.is_file():
+        print(f"[env] skipping {path.name}: it isn't a regular file", flush=True)
+        return
+    try:
+        # utf-8-sig drops a byte-order mark (Windows Notepad adds one), so the first key still counts.
+        with path.open(encoding="utf-8-sig") as file:
+            text = file.read()
+    except (OSError, UnicodeDecodeError):
+        print(f"[env] skipping {path.name}: it couldn't be read as UTF-8 text", flush=True)
+        return
+    for line in text.splitlines():
         line = line.strip()
         if not line or line.startswith("#") or "=" not in line:
             continue
@@ -47,6 +61,20 @@ def load_env_file(path):
             os.environ[key] = value
 
 
+def write_atomic(path, data):
+    """Replace path with data in one step, so a crash or a parallel reader never sees half a file."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    fd, temp = tempfile.mkstemp(dir=path.parent, prefix=path.stem + "-", suffix=".part")
+    try:
+        with os.fdopen(fd, "wb") as file:
+            file.write(data)
+        os.replace(temp, path)
+    except BaseException:
+        with contextlib.suppress(OSError):
+            os.unlink(temp)
+        raise
+
+
 load_env_file(ROOT / ".env")
 DOWNLOADS = ROOT / "downloads"
 VOICES = DOWNLOADS / "voice"
@@ -54,10 +82,10 @@ VOICES = DOWNLOADS / "voice"
 DOWNLOAD_INDEX = DOWNLOADS / "index.json"
 index_lock = threading.Lock()
 ALLOWED_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
-PORT = int(sys.argv[1]) if len(sys.argv) > 1 else 8000  # python server.py 8001 for another port
+PORT = 8000  # python server.py 8001 for another port; set from the command line in __main__
 # Only this computer can reach the server (and spend the API keys' credits) unless you
 # opt in, e.g. AIRDECK_HOST=0.0.0.0 to open it to your Wi-Fi.
-HOST = os.environ.get("AIRDECK_HOST", "127.0.0.1")
+HOST = os.environ.get("AIRDECK_HOST", "").strip() or "127.0.0.1"
 AI_TIMEOUT = 15  # seconds before a Gemini or ElevenLabs request gives up (songs are short)
 # The yt-dlp command, or Python's module when pip's per-user install folder isn't on PATH.
 YTDLP = ["yt-dlp"] if shutil.which("yt-dlp") else [sys.executable, "-m", "yt_dlp"]
@@ -82,6 +110,9 @@ def to_target(text):
     """
     text = text.strip()
     if not text or len(text) > 300:
+        return None
+    # NUL can't go in a command line, and a lone surrogate can't be encoded: refuse both.
+    if "\x00" in text or any("\ud800" <= char <= "\udfff" for char in text):
         return None
     if SINGLE_VIDEO.match(text):
         return text
@@ -119,6 +150,7 @@ if shutil.which("ffmpeg"):
 progress = {}  # job -> {"stage": "searching" | "downloading", "percent": number or None}
 progress_lock = threading.Lock()
 PROGRESS_MARK = "AIRDECK-PROGRESS"
+YTDLP_MISSING = 'yt-dlp isn\'t installed on the server (pip install -U "yt-dlp[default]")'
 
 
 def set_progress(job, **values):
@@ -148,9 +180,12 @@ def download(url, extra, job=None):
     ]
     # UTF-8 so titles with accents or emoji come through intact on Windows.
     env = {**os.environ, "PYTHONIOENCODING": "utf-8"}
-    proc = subprocess.Popen(
-        cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env
-    )
+    try:
+        proc = subprocess.Popen(
+            cmd, stdout=subprocess.PIPE, stderr=subprocess.STDOUT, text=True, encoding="utf-8", errors="replace", env=env
+        )
+    except FileNotFoundError:
+        return None, YTDLP_MISSING
     timed_out = threading.Event()
 
     def stop():
@@ -160,10 +195,13 @@ def download(url, extra, job=None):
     timer = threading.Timer(180, stop)
     timer.start()
     printed, errors = [], []
+    missing = False
     try:
         for line in proc.stdout:
             line = line.strip()
-            if line.startswith(PROGRESS_MARK):
+            if "No module named" in line and "yt_dlp" in line:  # python -m yt_dlp isn't installed
+                missing = True
+            elif line.startswith(PROGRESS_MARK):
                 numbers = []
                 for value in line.split()[1:4]:
                     try:
@@ -180,6 +218,8 @@ def download(url, extra, job=None):
         proc.wait()
     finally:
         timer.cancel()
+    if missing:
+        return None, YTDLP_MISSING
     if timed_out.is_set():
         return None, "download timed out"
     # 101 means "stopped at --max-downloads", which is fine.
@@ -189,23 +229,36 @@ def download(url, extra, job=None):
 
 
 def load_index():
+    """The saved index. Callers hold index_lock so they never read a half-written file."""
     try:
-        return json.loads(DOWNLOAD_INDEX.read_text(encoding="utf-8"))
+        index = json.loads(DOWNLOAD_INDEX.read_text(encoding="utf-8"))
     except (OSError, ValueError):
         return {}
+    return index if isinstance(index, dict) else {}
+
+
+def cache_key(target):
+    """Search terms are case-insensitive ("Clarity" and "clarity" are one search). Video ids and
+    links are case-sensitive, so they keep their case."""
+    return target.lower() if target.startswith("ytsearch1:") else target
 
 
 def remembered(target):
     """The earlier download for this search or link, if its file is still there."""
-    entry = load_index().get(target.lower())
-    return entry if entry and (ROOT / entry["file"]).exists() else None
+    with index_lock:
+        entry = load_index().get(cache_key(target))
+    return entry if isinstance(entry, dict) and "file" in entry and (ROOT / entry["file"]).exists() else None
 
 
 def remember(target, entry):
     with index_lock:
         index = load_index()
-        index[target.lower()] = entry
-        DOWNLOAD_INDEX.write_text(json.dumps(index, indent=1), encoding="utf-8")
+        index[cache_key(target)] = entry
+        try:
+            write_atomic(DOWNLOAD_INDEX, json.dumps(index, indent=1).encode("utf-8"))
+        except OSError as error:
+            # The song is downloaded either way; only the cache is lost.
+            print(f"[youtube] couldn't save the download index: {error}", flush=True)
 
 
 def get_song(target, job=None):
@@ -229,6 +282,8 @@ def get_song(target, job=None):
             return entry, None
         print(f"[youtube] {name} failed: {err}", flush=True)
         errors.append(err)
+        if err == YTDLP_MISSING:
+            break  # every other method would fail the same way
     # The first method's error is the real one; later fallbacks fail for their own reasons.
     return None, errors[0] if errors else "download failed"
 
@@ -237,6 +292,10 @@ def get_song(target, job=None):
 
 class DjError(Exception):
     """A DJ request failed in a way worth showing to the user."""
+
+
+class DjNotConfigured(DjError):
+    """A DJ service's API key isn't set on the server (a 503, not a bad answer)."""
 
 
 DJ_INSTRUCTIONS = """You are the AI DJ in AirDeck, a hand-gesture DJ app, picking the next songs for a live set.
@@ -282,19 +341,25 @@ def post_json(url, body, headers, timeout=60):
         with urllib.request.urlopen(request, timeout=timeout) as response:
             return response.read()
     except urllib.error.HTTPError as error:
-        detail = error.read().decode(errors="replace")
+        try:
+            detail = error.read().decode(errors="replace")
+        except (OSError, ValueError, http.client.HTTPException):
+            detail = ""
         try:
             parsed = json.loads(detail)
             detail = parsed.get("error", {}).get("message") or parsed.get("detail", {}).get("message") or detail
         except (ValueError, AttributeError):
             pass
         raise DjError(f"{error.code}: {str(detail)[:200]}") from None
-    except (urllib.error.URLError, TimeoutError) as error:
+    except (OSError, ValueError, http.client.HTTPException) as error:
+        # OSError covers URLError, timeouts and RemoteDisconnected; HTTPException covers IncompleteRead.
         raise DjError(f"couldn't reach the service ({error})") from None
 
 
 def clean(text, limit):
-    return " ".join(str(text).split())[:limit]
+    # Lone surrogates (possible in JSON input) can't be printed or encoded: replace them.
+    text = str(text).encode("utf-8", "replace").decode("utf-8")
+    return " ".join(text.split())[:limit]
 
 
 LIBRARY_PICK_SCHEMA = {
@@ -320,19 +385,26 @@ LIBRARY_PICK_SCHEMA = {
 def ask_gemini_for_picks(prompt, schema):
     key = os.environ.get("GEMINI_API_KEY")
     if not key:
-        raise DjError("set GEMINI_API_KEY before starting server.py to use the AI DJ")
+        raise DjNotConfigured("set GEMINI_API_KEY before starting server.py to use the AI DJ")
     body = {
         "systemInstruction": {"parts": [{"text": DJ_INSTRUCTIONS}]},
         "contents": [{"role": "user", "parts": [{"text": prompt}]}],
         "generationConfig": {"responseMimeType": "application/json", "responseSchema": schema},
     }
     url = f"https://generativelanguage.googleapis.com/v1beta/models/{GEMINI_MODEL}:generateContent"
-    data = json.loads(post_json(url, body, {"x-goog-api-key": key}, timeout=AI_TIMEOUT))
+    unexpected = DjError("Gemini returned an unexpected answer")
+    try:
+        data = json.loads(post_json(url, body, {"x-goog-api-key": key}, timeout=AI_TIMEOUT))
+    except ValueError:
+        raise unexpected from None
     try:
         parts = data["candidates"][0]["content"]["parts"]
-        return json.loads("".join(part.get("text", "") for part in parts))["picks"]
-    except (KeyError, IndexError, ValueError, TypeError):
-        raise DjError("Gemini returned an unexpected answer") from None
+        picks = json.loads("".join(part.get("text", "") for part in parts))["picks"]
+    except (KeyError, IndexError, ValueError, TypeError, AttributeError):
+        raise unexpected from None
+    if not isinstance(picks, list) or not all(isinstance(pick, dict) for pick in picks):
+        raise unexpected
+    return picks
 
 
 def bpm(song):
@@ -491,20 +563,50 @@ def dj_voice(text):
     """Speak a DJ line with ElevenLabs. Returns the MP3's path, cached by voice and text."""
     key = os.environ.get("ELEVENLABS_API_KEY")
     if not key:
-        raise DjError("set ELEVENLABS_API_KEY to use the ElevenLabs voice")
+        raise DjNotConfigured("set ELEVENLABS_API_KEY to use the ElevenLabs voice")
     text = clean(text, 300)
     if not text:
         raise DjError("nothing to say")
-    VOICES.mkdir(parents=True, exist_ok=True)
     path = VOICES / f"{hashlib.sha1(f'{ELEVENLABS_VOICE}|{text}'.encode()).hexdigest()[:16]}.mp3"
-    if not path.exists():
-        url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}?output_format=mp3_44100_128"
-        audio = post_json(url, {"text": text, "model_id": ELEVENLABS_MODEL}, {"xi-api-key": key}, timeout=AI_TIMEOUT)
-        path.write_bytes(audio)
+    # A cached file counts only if it really is audio (an older run may have cached an error page).
+    if path.exists():
+        with path.open("rb") as cached:
+            if looks_like_mp3(cached.read(4)):
+                return path
+    url = f"https://api.elevenlabs.io/v1/text-to-speech/{ELEVENLABS_VOICE}?output_format=mp3_44100_128"
+    audio = post_json(url, {"text": text, "model_id": ELEVENLABS_MODEL}, {"xi-api-key": key}, timeout=AI_TIMEOUT)
+    if not looks_like_mp3(audio):
+        raise DjError("ElevenLabs didn't return audio")
+    write_atomic(path, audio)
     return path
 
 
+def looks_like_mp3(data):
+    """True when the bytes start like an MP3: an ID3 tag or an MPEG frame sync."""
+    return data[:3] == b"ID3" or (len(data) >= 2 and data[0] == 0xFF and data[1] & 0xE0 == 0xE0)
+
+
 # ---- HTTP --------------------------------------------------------------------------
+
+LOCAL_NAMES = {"localhost", "127.0.0.1"}
+
+
+def is_this_server(url):
+    """True when url (a Host header value or an Origin) is http://<this server>:<PORT>.
+    Only localhost, 127.0.0.1 and AIRDECK_HOST count as this server's names."""
+    try:
+        parts = urlsplit(url)
+        port = parts.port or 80
+    except ValueError:
+        return False
+    return (
+        parts.scheme == "http"
+        and parts.hostname in LOCAL_NAMES | {HOST.lower()}
+        and port == PORT
+        and not parts.path
+        and "@" not in parts.netloc
+    )
+
 
 class Handler(SimpleHTTPRequestHandler):
     # Keep connections open between requests. With Python's default (HTTP/1.0, close
@@ -517,18 +619,38 @@ class Handler(SimpleHTTPRequestHandler):
 
     def home_is_landing(self):
         # The landing page is the home page (index.html is the hand tracker, ai-dj.html the AI DJ).
-        parts = urlparse(self.path)
+        try:
+            parts = urlparse(self.path)
+        except ValueError:  # a malformed URL such as "//[": not the home page; send_head refuses it
+            return
         if parts.path == "/":
             self.path = "/landing.html" + (f"?{parts.query}" if parts.query else "")
+
+    def is_hidden(self, path):
+        """True for dotfiles and dot folders. Checks the URL and the file it resolves to inside the
+        site folder, so a symlink or a drive-style name (c:.env on Windows) can't reach one.
+        Anything that resolves outside the site folder is hidden too."""
+        if any(part.startswith(".") for part in path.split("/") if part):
+            return True
+        try:
+            site = Path(self.directory).resolve()
+            target = Path(self.translate_path(self.path)).resolve()
+            parts = target.relative_to(site).parts
+        except (ValueError, OSError, RuntimeError):
+            return True
+        return any(part.startswith(".") for part in parts)
 
     def send_head(self):
         # Local configuration and Git metadata are never browser assets. Decode
         # before checking so an encoded dot cannot bypass the restriction.
-        path = unquote(urlparse(self.path).path)
-        if any(part.startswith(".") for part in path.split("/") if part):
-            self.send_error(404, "File not found")
-            return None
-        return super().send_head()
+        try:
+            path = unquote(urlparse(self.path).path)
+            if "\x00" not in path and not self.is_hidden(path):
+                return super().send_head()
+        except ValueError:  # a malformed URL, a NUL byte, or a name the system can't open
+            pass
+        self.send_error(404, "File not found")
+        return None
 
     def list_directory(self, path):
         self.send_error(404, "File not found")
@@ -539,6 +661,13 @@ class Handler(SimpleHTTPRequestHandler):
         self.send_header("Cache-Control", "no-cache")
         super().end_headers()
 
+    def api_allowed(self):
+        """Only our own pages may call the API. Checks the Host header (a DNS-rebinding site can
+        send its own name in Host) as well as the Origin, when the browser sends one."""
+        host = self.headers.get("Host")
+        origin = self.headers.get("Origin")
+        return bool(host) and is_this_server(f"http://{host}") and (origin is None or is_this_server(origin))
+
     def do_HEAD(self):
         self.home_is_landing()
         super().do_HEAD()
@@ -546,6 +675,8 @@ class Handler(SimpleHTTPRequestHandler):
     def do_GET(self):
         self.home_is_landing()
         if self.path.startswith("/api/progress"):
+            if not self.api_allowed():
+                return self.send_json(403, {"error": "forbidden origin"})
             job = parse_qs(urlparse(self.path).query).get("job", [""])[0]
             with progress_lock:
                 state = progress.get(job)
@@ -554,7 +685,8 @@ class Handler(SimpleHTTPRequestHandler):
 
     def log_message(self, format, *args):
         # The page polls progress several times a second; keep that out of the log.
-        if not self.path.startswith("/api/progress"):
+        # getattr: a request that failed early may have no path yet.
+        if not getattr(self, "path", "").startswith("/api/progress"):
             super().log_message(format, *args)
 
     def do_POST(self):
@@ -573,8 +705,7 @@ class Handler(SimpleHTTPRequestHandler):
             return self.send_json(400, {"error": "invalid request body"})
         # Only our own pages may call the API (blocks other websites from using it, and
         # the keys, through your browser).
-        origin = self.headers.get("Origin")
-        if origin and urlparse(origin).netloc != self.headers.get("Host"):
+        if not self.api_allowed():
             return self.send_json(403, {"error": "forbidden origin"})
         routes = {"/api/youtube": self.youtube, "/api/dj/pick": self.pick, "/api/dj/voice": self.voice}
         route = routes.get(self.path)
@@ -584,12 +715,13 @@ class Handler(SimpleHTTPRequestHandler):
             body = json.loads(raw or b"{}")
             if not isinstance(body, dict):
                 raise ValueError
-        except (ValueError, json.JSONDecodeError):
+        except (ValueError, RecursionError):  # RecursionError: JSON nested too deeply
             return self.send_json(400, {"error": "invalid request body"})
         route(body)
 
     def youtube(self, body):
-        target = to_target(str(body.get("url", "")))
+        url = body.get("url")
+        target = to_target(url) if isinstance(url, str) else None
         if not target:
             return self.send_json(400, {"error": "paste a single YouTube video link, or type a song name"})
         job = re.sub(r"[^\w-]", "", str(body.get("job", "")))[:40]
@@ -604,7 +736,7 @@ class Handler(SimpleHTTPRequestHandler):
         entry, error = get_song(target, job)
         if entry:
             return self.send_json(200, entry)
-        return self.send_json(502, {"error": error})
+        return self.send_json(503 if error == YTDLP_MISSING else 502, {"error": error})
 
     def pick(self, body):
         # JSON syntax alone does not validate the list/numeric fields the picker uses.
@@ -624,16 +756,19 @@ class Handler(SimpleHTTPRequestHandler):
             picks, offline = dj_pick(body)
         except DjError as error:
             print(f"[dj] pick failed: {error}", flush=True)
-            return self.send_json(502, {"error": str(error)})
+            return self.send_json(503 if isinstance(error, DjNotConfigured) else 502, {"error": str(error)})
         print(f"[dj] picked: {'; '.join(p['artist'] + ' - ' + p['title'] for p in picks)}", flush=True)
         self.send_json(200, {"picks": picks, "offline": offline})
 
     def voice(self, body):
+        text = body.get("text")
+        if not isinstance(text, str) or not clean(text, 300):
+            return self.send_json(400, {"error": "nothing to say"})
         try:
-            path = dj_voice(str(body.get("text", "")))
+            path = dj_voice(text)
         except DjError as error:
             print(f"[dj] voice failed: {error}", flush=True)
-            return self.send_json(502, {"error": str(error)})
+            return self.send_json(503 if isinstance(error, DjNotConfigured) else 502, {"error": str(error)})
         self.send_json(200, {"file": path.relative_to(ROOT).as_posix()})
 
     def send_json(self, status, body):
@@ -652,12 +787,33 @@ class Server(ThreadingHTTPServer):
     allow_reuse_address = sys.platform != "win32"
 
 
+def port_from_args(args):
+    """The port from `python server.py [port]`: 8000 by default, or None if the argument isn't a port."""
+    if len(args) < 2:
+        return 8000
+    try:
+        port = int(args[1])
+    except ValueError:
+        return None
+    return port if 1 <= port <= 65535 else None
+
+
 if __name__ == "__main__":
+    port = port_from_args(sys.argv)
+    if port is None:
+        print("Usage: python server.py [port]   (the port is a number from 1 to 65535)", file=sys.stderr)
+        sys.exit(2)
+    PORT = port
+    if HOST != "127.0.0.1":
+        print(f"Warning: AIRDECK_HOST is {HOST}, so other computers that can reach it can use the server "
+              "and the API keys' credits. Unset AIRDECK_HOST to keep it on this computer.", flush=True)
     try:
         server = Server((HOST, PORT), Handler)
-    except OSError:
-        sys.exit(f"Port {PORT} is already in use (another server.py still running?)\n"
-                 f"Stop it, or pick another port:  python server.py {PORT + 1}")
+    except OSError as error:
+        if error.errno in (errno.EADDRINUSE, getattr(errno, "WSAEADDRINUSE", None)):
+            sys.exit(f"Port {PORT} is already in use (another server.py still running?)\n"
+                     f"Stop it, or pick another port:  python server.py {PORT + 1}")
+        sys.exit(f"Couldn't start the server on {HOST}:{PORT}: {error}")
     print(f"AirDeck running at http://localhost:{PORT} (yt-dlp: {' '.join(YTDLP + JS_RUNTIME)})")
     gemini = f"on ({GEMINI_MODEL})" if os.environ.get("GEMINI_API_KEY") else "library picks only (set GEMINI_API_KEY for Gemini)"
     voice = "ElevenLabs" if os.environ.get("ELEVENLABS_API_KEY") else "browser voice (set ELEVENLABS_API_KEY for ElevenLabs)"

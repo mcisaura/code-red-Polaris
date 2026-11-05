@@ -27,6 +27,9 @@
   /* The 3D club fills the window behind everything (club.js). */
   #club { position: fixed; inset: 0; z-index: 0; }
   #club canvas { display: block; }
+  .club-error { position: fixed; left: 50%; top: 68%; transform: translate(-50%, -50%); z-index: 1; max-width: min(90vw, 460px);
+    margin: 0; padding: 14px 18px; border-radius: 18px; text-align: center; font-weight: 700; color: var(--text, #3a2412);
+    background: rgba(255,255,255,.9); box-shadow: 0 10px 30px rgba(0,0,0,.25); }
   .app { position: relative; z-index: 1; min-height: 100vh; display: flex; flex-direction: column; }
   .glass, header, .card, .help {
     background: linear-gradient(180deg, rgba(255,255,255,.84), rgba(255,255,255,.58));
@@ -217,10 +220,11 @@
 </div>
 
 <script type="module">
-import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 import { Deck } from "./audio.js";
-import { createClub } from "./club.js";
 
+// MediaPipe and the three.js club (club.js) load on demand, so an unreachable CDN shows a message
+// instead of leaving the whole page dead. Hand tracking and the controls still work without the 3D scene.
+const MEDIAPIPE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 
@@ -369,20 +373,37 @@ function resetSide(s) {
 }
 
 // ---- Setup ---------------------------------------------------------------
+let modelReady = false;
 async function loadModel() {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-  const options = (delegate) => ({
-    baseOptions: { modelAssetPath: MODEL_URL, delegate },
-    runningMode: "VIDEO",
-    numHands: 2,
-    minHandDetectionConfidence: 0.6,
-    minHandPresenceConfidence: 0.6,
-    minTrackingConfidence: 0.6,
-  });
+  startBtn.disabled = true;
+  startBtn.textContent = "Loading model…";
   try {
-    landmarker = await HandLandmarker.createFromOptions(fileset, options("GPU"));
-  } catch {
-    landmarker = await HandLandmarker.createFromOptions(fileset, options("CPU"));
+    const { HandLandmarker, FilesetResolver } = await import(MEDIAPIPE_URL);
+    const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      runningMode: "VIDEO",
+      numHands: 2,
+      minHandDetectionConfidence: 0.6,
+      minHandPresenceConfidence: 0.6,
+      minTrackingConfidence: 0.6,
+    });
+    try {
+      landmarker = await HandLandmarker.createFromOptions(fileset, options("GPU"));
+    } catch {
+      landmarker = await HandLandmarker.createFromOptions(fileset, options("CPU"));
+    }
+    modelReady = true;
+    startBtn.textContent = "Start camera";
+  } catch (err) {
+    console.error("Hand tracking failed to load", err);
+    modelReady = false;
+    const message = "Hand tracking failed to load (check your connection).";
+    startBtn.textContent = "Retry hand tracking";
+    statusEl.textContent = message;
+    $("placeholder").textContent = message;
+  } finally {
+    startBtn.disabled = false;
   }
 }
 
@@ -883,15 +904,28 @@ playBtn.addEventListener("click", () => {
   playBtn.textContent = deck.playing ? "Pause" : "Play";
 });
 
-startBtn.addEventListener("click", startCamera);
+startBtn.addEventListener("click", () => (modelReady ? startCamera() : loadModel()));
 
 // ---- 3D club ---------------------------------------------------------------------
 // Background scene. It only reads the deck and the camera canvas; it never changes them.
-createClub($("club"), {
-  audio: () => ({ wave: deck.playing ? deck.waveform() : null, playing: deck.playing, ...controls }),
-  camera: canvas,
-  cameraOn: () => lastVideoTime >= 0,
-});
+// If three.js can't be loaded, say so on the page instead of showing a blank background.
+async function loadClub() {
+  try {
+    const { createClub } = await import("./club.js");
+    createClub($("club"), {
+      audio: () => ({ wave: deck.playing ? deck.waveform() : null, playing: deck.playing, ...controls }),
+      camera: canvas,
+      cameraOn: () => lastVideoTime >= 0,
+    });
+  } catch (err) {
+    console.error("3D club failed to load", err);
+    const note = document.createElement("p");
+    note.className = "club-error";
+    note.textContent = "The 3D club could not load (check your connection). Hand tracking and the controls still work.";
+    $("club").appendChild(note);
+  }
+}
+loadClub();
 $("viewBtn").addEventListener("click", () => {
   const on = document.body.classList.toggle("club-view");
   $("viewBtn").textContent = on ? "Camera view" : "Club view";
@@ -899,15 +933,7 @@ $("viewBtn").addEventListener("click", () => {
 calibBtn.addEventListener("click", calibrate);
 updateControls();
 
-loadModel()
-  .then(() => {
-    startBtn.disabled = false;
-    startBtn.textContent = "Start camera";
-  })
-  .catch((err) => {
-    startBtn.textContent = "Model failed";
-    statusEl.textContent = err.message;
-  });
+loadModel();
 </script>
 </body>
 </html>
