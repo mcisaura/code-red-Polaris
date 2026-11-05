@@ -88,7 +88,7 @@ function seeded(text) {
 // controlMap: () => the page's pinch calibration and control ranges ({ pinchClosed,
 // pinchOpen, freqMin, freqMax, betweenClosed, betweenOpen }), read live.
 // onSetEnd(results): the set is over (its last song faded out): { score, perfect, good,
-// miss, best, accuracy (0-1) }.
+// miss, best, accuracy (0-1), judged (the hits judged; 0 when none) }.
 export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = true, controlMap = () => defaultControls, onSetEnd = () => {} }) {
   const canvas = document.createElement("canvas");
   canvas.className = "djGame";
@@ -556,6 +556,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
       miss: score.miss,
       best: score.best,
       accuracy: score.judged ? score.points / score.judged : 0,
+      judged: score.judged, // 0: nothing was judged (no one in frame, say), so there's no grade
     };
     const mine = generation;
     queue.endSet().then((ended) => {

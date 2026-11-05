@@ -60,6 +60,16 @@ function blends(a, b) {
   return Math.abs(ratio - 1) <= blendTolerance;
 }
 
+// The picked ids that are songs in the library: no repeats (the first pick counts), at most setSize.max.
+function cleanSet(ids, known) {
+  const picked = [];
+  for (const id of Array.isArray(ids) ? ids : []) {
+    if (picked.length === setSize.max) break;
+    if (typeof id === "string" && known.has(id) && !picked.includes(id)) picked.push(id);
+  }
+  return picked;
+}
+
 function savedSet() {
   try {
     const ids = JSON.parse(localStorage.getItem(savedSetKey) ?? "[]");
@@ -108,7 +118,7 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
     if (mine !== run) return; // another screen came up meanwhile
     const known = new Set(songs.map((song) => song.id));
     const missing = songs.filter((song) => song.available === false).length;
-    let picked = (lastSet.length ? lastSet : savedSet()).filter((id) => known.has(id)).slice(0, setSize.max);
+    let picked = cleanSet(lastSet.length ? lastSet : savedSet(), known);
 
     show(`
       <div class="djStart-panel djStart-wide">
@@ -196,13 +206,15 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
   async function cameraStep() {
     const mine = ++run;
     show(`<div class="djStart-panel"><p class="djStart-status">Starting the camera…</p></div>`);
+    // true when it's on; otherwise a message saying why (the page's startCamera gives one)
     let started = false;
-    try { started = await startCamera(); } catch { /* show the retry screen */ }
+    try { started = await startCamera(); } catch (error) { started = error?.message || false; }
     if (mine !== run) return;
-    if (!started) {
+    if (started !== true) {
+      const reason = typeof started === "string" && started ? started : "The camera didn't start. Allow camera access for this page, then try again.";
       show(`
         <div class="djStart-panel">
-          <p class="djStart-status">The camera didn't start. Allow camera access for this page, then try again.</p>
+          <p class="djStart-status">${escape(reason)}</p>
           <button class="lime" type="button">Try again</button>
         </div>`);
       root.querySelector("button").addEventListener("click", cameraStep, { once: true });
@@ -282,14 +294,21 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
       showLoadError(error, replay);
       return;
     }
-    countdown();
+    countdown(begin, 1000, () => setSelect()); // hidden meanwhile: back to the pick screen, the set not started
   }
 
-  function countdown(onGo = begin, stepMs = 1000) {
+  // onHidden: the tab was hidden during the count (nothing may start while hidden); without it, the
+  // count just stops (the page then shows its Paused panel).
+  function countdown(onGo = begin, stepMs = 1000, onHidden = null) {
     const mine = ++run;
     let count = 3;
     const tick = () => {
       if (mine !== run) return;
+      if (document.hidden) {
+        run += 1;
+        onHidden?.();
+        return;
+      }
       show(`<div class="djStart-count">${count > 0 ? count : "Go!"}</div>`);
       if (count === 0) {
         onGo();
@@ -328,16 +347,19 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
   }
 
   // ---- results
-  function results({ score, perfect, good, miss, best, accuracy }) {
+  function results({ score, perfect, good, miss, best, accuracy, judged }) {
     run += 1;
-    const grade = accuracy >= 0.95 ? "S" : accuracy >= 0.85 ? "A" : accuracy >= 0.7 ? "B" : accuracy >= 0.5 ? "C" : "D";
+    // Nothing judged (nobody in frame, say): no grade to give.
+    const none = judged === 0;
+    const grade = none ? "–" : accuracy >= 0.95 ? "S" : accuracy >= 0.85 ? "A" : accuracy >= 0.7 ? "B" : accuracy >= 0.5 ? "C" : "D";
     show(`
       <div class="djStart-panel">
         <p class="djStart-status">Set complete!</p>
-        <div class="djStart-grade grade-${grade}">${grade}</div>
+        <div class="djStart-grade grade-${none ? "none" : grade}">${grade}</div>
+        ${none ? `<p class="djStart-hint">No hits judged</p>` : ""}
         <p class="djStart-score">${score.toLocaleString()}</p>
         <dl class="djStart-stats">
-          <div><dt>Accuracy</dt><dd>${Math.round(accuracy * 100)}%</dd></div>
+          <div><dt>Accuracy</dt><dd>${none ? "–" : `${Math.round(accuracy * 100)}%`}</dd></div>
           <div><dt>Best combo</dt><dd>${best}×</dd></div>
           <div><dt>Perfect</dt><dd>${perfect}</dd></div>
           <div><dt>Good</dt><dd>${good}</dd></div>
@@ -454,6 +476,7 @@ function addStyles() {
 .djStart-grade.grade-B { color: #1e95e3; }
 .djStart-grade.grade-C { color: #f5861f; }
 .djStart-grade.grade-D { color: #c9cfd6; }
+.djStart-grade.grade-none { color: #9aa5b1; }
 .djStart-score { font: 900 30px var(--font, Tahoma), "Segoe UI", sans-serif !important; font-variant-numeric: tabular-nums; margin-bottom: 10px !important; }
 .djStart-stats { display: grid; grid-template-columns: repeat(5, 1fr); gap: 6px; margin: 0 0 18px; }
 .djStart-stats div { padding: 6px 4px; border-radius: 8px; background: #f3f8fd; border: 1px solid #c9dbee; }
@@ -463,6 +486,9 @@ function addStyles() {
 @keyframes djStart-pop { from { transform: scale(1.35); opacity: 0; } 25% { transform: scale(1); opacity: 1; } to { opacity: 0.85; } }
 @media (prefers-reduced-motion: reduce) { .djStart-count, .djStart-grade { animation: none; } }
 @media (max-width: 560px) {
+  /* Phones: the panels get the whole screen (the 16:9 camera stage is too short for them). */
+  .djStart { position: fixed; inset: 0; z-index: 50; }
+  .djStart-row button, .djStart-row button.secondary { min-width: 0; }
   .djStart-moves { grid-template-columns: repeat(2, 1fr); }
   .djStart-stats { grid-template-columns: repeat(3, 1fr); }
 }`;
