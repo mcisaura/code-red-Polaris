@@ -152,7 +152,10 @@
   #deckWorkspace:is(:fullscreen, .expanded) .stage {
     width: 100%; height: 100%; max-height: none; aspect-ratio: auto; border-radius: 16px;
   }
+  /* The sidebar scrolls instead of squeezing its cards: the queue card keeps its height and the Library stays reachable. */
   #deckWorkspace:is(:fullscreen, .expanded) aside { height: 100%; min-height: 0; overflow-y: auto; }
+  #songQueue, aside > * { flex-shrink: 0; }
+  .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
   @media (max-width: 900px) {
     #deckWorkspace:is(:fullscreen, .expanded) { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
     #deckWorkspace:is(:fullscreen, .expanded) aside { height: auto; max-height: 34vh; }
@@ -161,6 +164,7 @@
 </style>
 </head>
 <body class="world-sunset">
+<h1 class="sr-only">AirDeck · DJ Deck</h1>
 <header class="topbar glass">
   <a class="brand" href="landing.html" title="Back to the home page"><svg width="34" height="34" viewBox="0 0 36 36" aria-hidden="true"><defs><radialGradient id="lg" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#ffffff"/><stop offset="0.2" stop-color="#9be0ff"/><stop offset="0.75" stop-color="#1e95e3"/><stop offset="1" stop-color="#0b62b0"/></radialGradient></defs><circle cx="18" cy="18" r="17" fill="url(#lg)"/><path d="M7 20c3-6 6 6 9 0s6 6 9 0 4 2 4 2" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><ellipse cx="13" cy="10" rx="6" ry="3.4" fill="#fff" opacity="0.75" transform="rotate(-25 13 10)"/></svg>AirDeck</a>
   <nav class="modes" aria-label="Modes"><a class="dj" href="index.html" aria-current="page">DJ Deck</a><a class="arcade" href="arcade-versus.html">Arcade</a></nav>
@@ -174,7 +178,7 @@
     <div class="stage-actions"><button id="fullscreenBtn" class="secondary" aria-pressed="false">Full screen</button></div>
     <video id="video" playsinline muted></video>
     <canvas id="canvas" width="1280" height="720"></canvas>
-    <div class="placeholder" id="placeholder"><div class="title">AirDeck</div><div class="hint">Click “Start camera”, then show both hands</div></div>
+    <div class="placeholder" id="placeholder"><div class="title">AirDeck</div><div class="hint" id="placeholderHint">Click “Start camera”, then show both hands</div></div>
   </div>
 
   <aside>
@@ -221,12 +225,12 @@
 <div id="cinema"><img src="easter/absolute-cinema.gif" alt="Absolute cinema"></div>
 
 <script type="module">
-import { HandLandmarker, FilesetResolver } from "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 import { Deck } from "./audio.js?v=8";
 import { FrameFx } from "./frame.js?v=8";
 import { BubbleParticles } from "./bubble-particles.js";
 import { createQueue, createQueuePanel, createTransport, createUpNext } from "./queue.js?v=4";
 
+const MEDIAPIPE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
 const WASM_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14/wasm";
 
@@ -383,10 +387,16 @@ const knobs = { left: 0.5, right: 1 };
 let frames = 0, fpsTime = performance.now();
 const perf = { detect: 0, draw: 0 };   // average ms per frame: hand detection, and everything else (tracking maths + drawing)
 
+// A pinch range is usable only when both ends are numbers and "open" sits clearly above "closed".
+const PINCH_MIN_GAP = 0.03;
+function validPinchRange(closed, open) {
+  return Number.isFinite(closed) && Number.isFinite(open) && open - closed >= PINCH_MIN_GAP;
+}
+
 // Restore saved calibration
 try {
   const saved = JSON.parse(localStorage.getItem("airdeck-pinch-v2") || "null");
-  if (saved && saved.closed < saved.open) ({ closed: PINCH_CLOSED, open: PINCH_OPEN } = saved);
+  if (saved && validPinchRange(saved.closed, saved.open)) ({ closed: PINCH_CLOSED, open: PINCH_OPEN } = saved);
 } catch {}
 
 // ---- Panel ---------------------------------------------------------------
@@ -458,22 +468,42 @@ function resetSide(s) {
 }
 
 // ---- Setup ---------------------------------------------------------------
+// The MediaPipe library is loaded here, not at the top of the module, so that if the CDN can't be
+// reached only hand tracking fails: the queue, library, transport, help and fullscreen still work.
+let modelReady = false;
 async function loadModel() {
-  const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
-  const options = (delegate) => ({
-    baseOptions: { modelAssetPath: MODEL_URL, delegate },
-    runningMode: "VIDEO",
-    numHands: 2,
-    minHandDetectionConfidence: 0.5,   // a little more forgiving than 0.6: fewer dropouts when a hand turns or blurs
-    minHandPresenceConfidence: 0.5,
-    minTrackingConfidence: 0.5,
-  });
+  startBtn.disabled = true;
+  startBtn.textContent = "Loading model…";
   try {
-    landmarker = await HandLandmarker.createFromOptions(fileset, options("GPU"));
-  } catch {
-    landmarker = await HandLandmarker.createFromOptions(fileset, options("CPU"));
+    const { HandLandmarker, FilesetResolver } = await import(MEDIAPIPE_URL);
+    const fileset = await FilesetResolver.forVisionTasks(WASM_URL);
+    const options = (delegate) => ({
+      baseOptions: { modelAssetPath: MODEL_URL, delegate },
+      runningMode: "VIDEO",
+      numHands: 2,
+      minHandDetectionConfidence: 0.5,   // a little more forgiving than 0.6: fewer dropouts when a hand turns or blurs
+      minHandPresenceConfidence: 0.5,
+      minTrackingConfidence: 0.5,
+    });
+    try {
+      landmarker = await HandLandmarker.createFromOptions(fileset, options("GPU"));
+    } catch {
+      landmarker = await HandLandmarker.createFromOptions(fileset, options("CPU"));
+    }
+    modelReady = true;
+    startBtn.textContent = "Start camera";
+  } catch (err) {
+    console.error("Hand tracking failed to load", err);
+    modelReady = false;
+    const message = "Hand tracking failed to load (check your connection).";
+    startBtn.textContent = "Retry hand tracking";
+    statusEl.textContent = message;
+    $("placeholderHint").textContent = message + " The queue and library still work.";
+  } finally {
+    startBtn.disabled = false;
   }
 }
+startBtn.addEventListener("click", () => (modelReady ? startCamera() : loadModel()));
 
 async function startCamera() {
   startBtn.disabled = true;
@@ -755,6 +785,9 @@ function update(result, now) {
 
   updateModes(left, right, now);
   updateBlend(left, right, now);
+  // live = both hands were detected on this camera frame (not the short hold-over the controls use),
+  // so Bubble Aero stops emitting as soon as the hands leave.
+  frame.live = Boolean(assigned.left && assigned.right);
   updateFrame(left, right, now);
   // The lock zone only counts in normal mode (not while a fist mode or a blend is using your hands);
   // it has a little hysteresis so a hand wobbling on the line doesn't reset the hold.
@@ -1127,9 +1160,9 @@ window.addEventListener("keydown", (e) => {
 });
 
 // ---- Hand-driven blend between songs ---------------------------------------------------
-// "Next" in the song zone (or S then 1) beat-matches the next queued song in on a downbeat
-// (queue.startHandMix, the same mix the AI DJ coach uses) and hands it to you:
-// left hand height = crossfade into the new song; right hand height = fade the old song out faster.
+// "Next" in the song zone (or S then 1) starts a manual hand blend into the next queued song
+// (queue.startHandMix, with no beat alignment, speed matching or bass cut: any tempo pair works)
+// and hands the crossfade to you: left hand height = crossfade into the new song; right hand height = fade the old song out faster.
 // No left hand for BLEND_IDLE_MS → it finishes by itself. With Hand blend off, or when the
 // playback is idle, the next song starts without a hand blend.
 let blendOn = true;
@@ -1162,6 +1195,12 @@ async function nextSong() {
     } finally {
       defaultQueueStarting = false;
     }
+    return;
+  }
+  // The AI DJ is already mixing (waiting for its downbeat, or talking over the mix): leave it alone.
+  // Cutting now would hard-cut the mix, and a hand mix can't start on top of it either.
+  if (queue.getUpNext()?.mixing) {
+    flash("A mix is already in progress");
     return;
   }
   if (!deck.playing) {
@@ -1360,7 +1399,7 @@ bubbleCanvas.id = "bubbleCanvas";
 bubbleCanvas.width = canvas.width; bubbleCanvas.height = canvas.height;
 stageEl.appendChild(bubbleCanvas);
 const bubbleParticles = new BubbleParticles(bubbleCanvas);
-const frame = { forced: false, active: false, target: null, lastSeen: -Infinity, corners: null };
+const frame = { forced: false, active: false, live: false, target: null, lastSeen: -Infinity, corners: null };   // live: both hands tracked on this camera frame
 
 // Any pose works. Keep fixed physical fingertip identities through smoothing;
 // order the resulting perimeter only at render time. Missing hands keep their
@@ -1409,11 +1448,19 @@ function showFx(on) {
   if (on !== fxShown) { fxShown = on; frameFx.canvas.style.visibility = on ? "visible" : "hidden"; }
 }
 let shownCorners = null, lastFxT = 0;
+let shapeOn = false;   // the shape is up this frame (Bubble Aero emits only from a shape that is up)
+// Drops the drawn shape and Bubble Aero's particles at once. Used when the idle screen takes over;
+// a shape that merely ends keeps its bubbles in the air so they drift away.
+function clearFrameVisuals() {
+  shownCorners = null;
+  frameFx.clear(); showFx(false);
+  bubbleParticles.clear();
+}
 function drawFrame(now) {
   trackingDebug.renderReason = null;
-  if (!frameFx.ok) { trackingDebug.renderReason = "WebGL unavailable"; return; }
   const dt = Math.min(100, now - lastFxT);
   lastFxT = now;
+  shapeOn = false;
   let target;
   if (visualFx === "off") { trackingDebug.renderReason = "visual selected: off"; shownCorners = null; frameFx.clear(); showFx(false); return; }   // visuals switched off (5)
   if (frame.forced) {   // test key: a slowly turning, skewed shape
@@ -1425,13 +1472,18 @@ function drawFrame(now) {
   } else if (frame.target && (frame.active || now - frame.lastSeen < L_HOLD_MS)) {
     target = frame.target;
   } else { shownCorners = null; frameFx.clear(); showFx(false); return; }
-  // ease the drawn corners toward the tracked ones (frame-rate independent)
+  // ease the drawn corners toward the tracked ones (frame-rate independent).
+  // This runs before the WebGL check, so the shape (and Bubble Aero) still follows the hands without WebGL.
   const k = 1 - Math.exp(-dt / SHAPE_EASE_MS);
   if (!shownCorners) shownCorners = target.map((p) => ({ ...p }));
   else shownCorners.forEach((p, i) => { p.x += (target[i].x - p.x) * k; p.y += (target[i].y - p.y) * k; });
   const quad = orderByAngle(shownCorners);
   if (polyArea(quad) < (fxShown ? SHAPE_HIDE_AREA : SHAPE_MIN_AREA) * canvas.width * canvas.height) {
     trackingDebug.renderReason = "projected shape too small"; frameFx.clear(); showFx(false); return;
+  }
+  shapeOn = true;
+  if (!frameFx.ok) {   // no WebGL, or the context was lost: don't leave the last frame frozen on screen
+    trackingDebug.renderReason = "WebGL unavailable"; showFx(false); return;
   }
   showFx(true);
   frameFx.render(frameSource(), quad, visualFx, deck.bass?.() ?? 0, now);
@@ -1442,7 +1494,10 @@ function fxLoop(t) {
   if (bubbleCanvas.width !== canvas.width || bubbleCanvas.height !== canvas.height) {
     bubbleCanvas.width = canvas.width; bubbleCanvas.height = canvas.height; bubbleParticles.clear();
   }
-  if (visualFx === "bubbles") bubbleParticles.render(fxShown && shownCorners ? orderByAngle(shownCorners) : null, deck.bass?.() ?? 0, t);
+  // Bubbles are emitted only while the hands are tracked right now (not during the short hold-over
+  // after they vanish). Bubbles already in the air keep drifting away and then fade out.
+  const emitting = visualFx === "bubbles" && shapeOn && (frame.live || frame.forced);
+  if (visualFx === "bubbles") bubbleParticles.render(emitting ? orderByAngle(shownCorners) : null, deck.bass?.() ?? 0, t);
   else bubbleParticles.clear();
   requestAnimationFrame(fxLoop);
 }
@@ -1665,12 +1720,16 @@ async function calibrate() {
   };
   const closed = await phase("Pinch thumb + index on both hands");
   const open = await phase("Spread thumb + index wide");
-  if (closed.length < 10 || open.length < 10 || median(closed) >= median(open)) {
-    calibMsg.textContent = "Calibration failed (hands not seen). Try again.";
+  // Small margins so a real pinch reaches 0 and a comfortable spread reaches 1. They are applied
+  // first, so the range is checked as it would be used: a closed value at or above the open one is refused.
+  const enoughSamples = closed.length >= 10 && open.length >= 10;
+  const closedAt = enoughSamples ? median(closed) + 0.03 : NaN;
+  const openAt = enoughSamples ? median(open) * 0.9 : NaN;
+  if (!enoughSamples || !validPinchRange(closedAt, openAt)) {
+    calibMsg.textContent = "Calibration failed (hands not seen, or the pinch and spread were too similar). Try again.";
   } else {
-    // Small margins so a real pinch reaches 0 and a comfortable spread reaches 1
-    PINCH_CLOSED = median(closed) + 0.03;
-    PINCH_OPEN = median(open) * 0.9;
+    PINCH_CLOSED = closedAt;
+    PINCH_OPEN = openAt;
     try { localStorage.setItem("airdeck-pinch-v2", JSON.stringify({ closed: PINCH_CLOSED, open: PINCH_OPEN })); } catch {}
     calibMsg.textContent = `Calibrated: closed ${PINCH_CLOSED.toFixed(2)}, open ${PINCH_OPEN.toFixed(2)}`;
   }
@@ -1991,7 +2050,11 @@ function idleLoop(now) {
   } else {
     if (!idleBlank) {
       ctx.clearRect(0, 0, canvas.width, canvas.height);   // the stage's Aero glass shows through
-      frameFx.clear(); showFx(false);
+      // Synthetic hands (or the L test) were removed: forget the shape and its tips too, or the last
+      // visual and the Bubble Aero bubbles would keep drawing on the idle screen.
+      Object.assign(frame, { active: false, live: false, target: null, corners: null, lastSeen: -Infinity });
+      frameTips.left = frameTips.right = null;
+      clearFrameVisuals();
       $("placeholder")?.style.setProperty("display", "");
       idleBlank = true;
     }
@@ -2049,21 +2112,12 @@ function updateSongCard() {
 }
 queue.on(updateSongCard);
 
-startBtn.addEventListener("click", startCamera);
 calibBtn.addEventListener("click", calibrate);
 updateControls();
 
 Object.assign(window.airdeck, { modes, frame, FX_NAMES, lock, controls, blend, update, canvas, trackingDebug, sides });
 
-loadModel()
-  .then(() => {
-    startBtn.disabled = false;
-    startBtn.textContent = "Start camera";
-  })
-  .catch((err) => {
-    startBtn.textContent = "Model failed";
-    statusEl.textContent = err.message;
-  });
+loadModel();
 </script>
 </body>
 </html>
