@@ -28,6 +28,7 @@ const voiceWaitMs = 4000; // longest wait for the ElevenLabs clip before using t
 const restartThreshold = 3; // ⏮ restarts the song if it's past this many seconds, else goes back one
 const progressPollMs = 400;
 const hoverDecodeMs = 250; // hovering a song this long starts decoding it
+const seekStepSeconds = 5; // the arrow keys move the seek bar this far
 
 // Python's dev server sometimes resets the first request on a connection that sat
 // idle ("Failed to fetch"). A network error (not an HTTP error) gets one retry.
@@ -46,6 +47,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   // DJ picks also carry dj: { intro, voice }, voice being the ElevenLabs clip once it's asked for.
   let items = [];
   let currentId = null;
+  // The song the last play request asked for: loading, or failed. ⏭ and ⏮ step from it
+  // (see stepIndex), so a second press while a song loads moves on, and a broken song is skipped.
+  let requestedId = null;
   let status = null; // { message, isError } while adding or loading
   let nextId = 1;
   let played = []; // titles in the order they played, for the DJ to avoid repeats
@@ -133,6 +137,11 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
   const currentIndex = () => items.findIndex((item) => item.id === currentId);
   const upcoming = () => items.slice(currentIndex() + 1);
+  // The index ⏭ and ⏮ step from: the last song asked for, else the playing one (-1 for none).
+  const stepIndex = () => {
+    const index = items.findIndex((item) => item.id === requestedId);
+    return index === -1 ? currentIndex() : index;
+  };
 
   // How the DJ moves from song to song: beat-matched blends or echo-outs (transitions.js).
   const transitions = createTransitions(deck);
@@ -211,6 +220,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         return buffer;
       });
       promise.catch(() => {
+        // A superseded decode failing late must not delete the newer one or mark the song failed.
+        if (decoded.get(item.id) !== promise) return;
         decoded.delete(item.id);
         loadFailed.add(item.id);
       });
@@ -239,6 +250,12 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   // cancel a load, so a slow older one finishing late would replace a newer song.
   let playRequest = 0;
   let endingRequest = null;
+  // Stops whatever is loading without asking for another song (pause, seek, ending a set).
+  // ⏭ and ⏮ then step from the song that's playing.
+  function cancelRequest() {
+    playRequest += 1;
+    requestedId = currentId;
+  }
   function cancelEnding() {
     if (endingRequest === null) return;
     endingRequest = null;
@@ -254,6 +271,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   function playItem(id, { mix = false, entry = false } = {}) {
     cancelEnding();
     const request = ++playRequest;
+    requestedId = id;
     playsPending += 1;
     playChain = playChain
       .then(() => (request === playRequest ? loadAndPlay(id, { mix, entry, request }) : undefined))
@@ -693,6 +711,11 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
     // Removing the playing song leaves it playing; it's just off the list.
     remove(id) {
+      // Stepping from a removed request goes on from the song before it, so ⏭ still reaches the one after.
+      if (requestedId === id) {
+        const index = items.findIndex((entry) => entry.id === id);
+        requestedId = items[index - 1]?.id ?? null;
+      }
       items = items.filter((entry) => entry.id !== id);
       if (currentId === id) currentId = null;
       changed();
@@ -711,7 +734,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       }
       cancelEnding();
       if (deck.playing) {
-        playRequest += 1; // pause owns playback even if a selection is still decoding
+        cancelRequest(); // pause owns playback even if a selection is still decoding
         cancelTransition();
         transitions.cancel();
       }
@@ -722,12 +745,12 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Plays the song after the current one, wrapping to the top.
     next() {
       if (!items.length) return;
-      queue.play(items[(currentIndex() + 1) % items.length].id);
+      queue.play(items[(stepIndex() + 1) % items.length].id);
     },
 
     // Like most players: restarts the song if it's a few seconds in, otherwise goes back one.
     previous() {
-      const index = currentIndex();
+      const index = stepIndex();
       if (position() > restartThreshold || index <= 0) return queue.seek(0);
       queue.play(items[index - 1].id);
     },
@@ -737,7 +760,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       if (!deck.buffer) return;
       cancelEnding();
       cancelTransition();
-      playRequest += 1;
+      cancelRequest();
       transitions.cancel();
       const wasPlaying = deck.playing;
       if (wasPlaying) deck.pause();
@@ -805,6 +828,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       transitions.cancel();
       deck.stopSource();
       currentId = null;
+      requestedId = null;
       Object.assign(dj, { on: true, set: true, vibe: "", busy: false, waitToStart: true, status: null });
       dj.generation += 1;
       const songs = ids.map((id) => library.find((song) => song.id === id)).filter(Boolean);
@@ -831,7 +855,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // keeps the set). Resolves once it's quiet.
     async endSet(ms = 3000) {
       cancelTransition();
-      const request = ++playRequest;
+      cancelRequest();
+      const request = playRequest;
       endingRequest = request;
       dj.generation += 1;
       dj.on = false;
@@ -843,6 +868,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       transitions.cancel();
       deck.stopSource();
       currentId = null;
+      requestedId = null;
       duck(1);
       if (deck.filter) deck.filter.frequency.setTargetAtTime(20000, deck.ctx.currentTime, 0.05);
       changed();
@@ -973,10 +999,16 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // secondsToOut (until the current song should be mixed out by), secondsToDownbeat (the
     // next one on the beat grid the mix uses), beatSeconds, short }.
     getUpNext() {
-      // While mixing (the AI's or the hands'), it's about the song coming in.
-      const mixing = transitioning || Boolean(handMix && !handMix.done);
-      const incoming = mixing && (items.find((entry) => entry.id === transitionId) ?? items.find((entry) => entry.id === currentId));
-      const next = incoming || upcoming()[0];
+      // While mixing (the AI's or the hands'), it's about the song coming in, and only that
+      // song: if it was removed mid-mix, this is the normal state (the playing song is the one going out).
+      // Once a hand mix has landed, the song coming in is the playing one.
+      const incoming = transitioning
+        ? items.find((entry) => entry.id === transitionId)
+        : handMix && !handMix.done
+          ? items.find((entry) => entry.id === currentId)
+          : undefined;
+      const mixing = Boolean(incoming);
+      const next = incoming ?? upcoming()[0];
       if (!next) return null;
       const preview = {
         item: next,
@@ -1073,7 +1105,7 @@ const styles = `
 .queuePanel-djOption { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); cursor: pointer; }
 .queuePanel-djLabel { font-size: 12px; font-weight: 700; color: var(--between); white-space: nowrap; }
 .queuePanel-status { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
-.queuePanel-status.error { color: #ff7b7b; }
+.queuePanel-status.error { color: #b00020; } /* 7:1 on the cream panel (WCAG AA needs 4.5:1) */
 .queuePanel-list, .queuePanel-downloads {
   margin: 0; padding: 0; list-style: none; display: flex; flex-direction: column; gap: 4px;
 }
@@ -1099,7 +1131,7 @@ const styles = `
 .queuePanel-track small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queuePanel-row.current small { color: var(--between); font-weight: 600; }
 .queuePanel-row.fromDj small::before { content: "✦ "; color: var(--between); }
-.queuePanel-row.failed small { color: #ff7b7b; }
+.queuePanel-row.failed small { color: #b00020; }
 .queuePanel-actions { display: flex; gap: 4px; }
 .queuePanel-row .queuePanel-actions button { width: 30px; height: 30px; padding: 0; }
 .queuePanel-empty { margin: 0; padding: 10px 0; font-size: 13px; text-align: center; color: var(--muted); }
@@ -1113,7 +1145,7 @@ const styles = `
 .queuePanel-library summary span { flex: 1; }
 .queuePanel-library .queuePanel-list { margin-top: 6px; }
 .queuePanel-row.librarySong { cursor: default; }
-.queuePanel-row.missing small { color: var(--between); }
+.queuePanel-row.missing small { color: #94500f; } /* a dark orange: --between is about 2.5:1 on cream */
 .queuePanel-beta { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
 .queuePanel-betaLabel { font-size: 12px; font-weight: 600; color: var(--muted); }
 .queuePanel-betaLabel b { color: var(--between); }
@@ -1181,7 +1213,20 @@ export function createTransport(queue, deck, { onNext = () => queue.next() } = {
   const fill = element("span");
   const bar = element("div", { className: "queuePanel-bar" }, [fill]);
   const thumb = element("div", { className: "queueTransport-thumb" });
-  const seek = element("div", { className: "queueTransport-seek", role: "slider", "aria-label": "Song position" }, [bar, thumb]);
+  const seek = element(
+    "div",
+    {
+      className: "queueTransport-seek",
+      role: "slider",
+      tabindex: "0",
+      "aria-label": "Song position",
+      "aria-valuemin": "0",
+      "aria-valuemax": "0",
+      "aria-valuenow": "0",
+      "aria-valuetext": "0:00",
+    },
+    [bar, thumb],
+  );
   const elapsed = element("span", { text: "0:00" });
   const total = element("span", { text: "0:00" });
   const playButton = element("button", { type: "button", className: "queueTransport-play", "aria-label": "Play or pause", text: "▶" });
@@ -1244,6 +1289,15 @@ export function createTransport(queue, deck, { onNext = () => queue.next() } = {
     dragRatio = null;
     queue.seek(ratio * queue.getPlayback().duration);
   });
+  // Arrow keys seek by seekStepSeconds (the slider is focusable).
+  seek.addEventListener("keydown", (event) => {
+    if (event.key !== "ArrowLeft" && event.key !== "ArrowRight") return;
+    const { loaded, position } = queue.getPlayback();
+    if (!loaded) return;
+    event.preventDefault();
+    deck.ensureContext();
+    queue.seek(position + (event.key === "ArrowRight" ? seekStepSeconds : -seekStepSeconds));
+  });
 
   function update() {
     const { items, currentId, loadingId } = queue.getState();
@@ -1256,10 +1310,16 @@ export function createTransport(queue, deck, { onNext = () => queue.next() } = {
     fill.style.width = `${ratio * 100}%`;
     thumb.style.left = `${ratio * 100}%`;
     thumb.hidden = !playback.loaded || Boolean(loading);
-    elapsed.textContent = formatTime(ratio * playback.duration);
+    const seconds = ratio * playback.duration;
+    elapsed.textContent = formatTime(seconds);
     total.textContent = formatTime(playback.duration);
+    seek.setAttribute("aria-valuemax", String(Math.round(playback.duration)));
+    seek.setAttribute("aria-valuenow", String(Math.round(seconds)));
+    seek.setAttribute("aria-valuetext", `${formatTime(seconds)} of ${formatTime(playback.duration)}`);
     playButton.textContent = playback.playing ? "⏸" : "▶";
-    requestAnimationFrame(update);
+    // Stops once the bar is off the page (the embedded panel takes its own out at once).
+    // Callers attach the bar as they create it.
+    if (root.isConnected) requestAnimationFrame(update);
   }
   requestAnimationFrame(update);
   return root;
@@ -1329,13 +1389,13 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   let rowsKey = ""; // the rows are only rebuilt when this changes, not on every progress tick
   let hoverTimer = null;
 
-  const input = element("input", { type: "text", placeholder: "YouTube link or song name" });
+  const input = element("input", { type: "text", placeholder: "YouTube link or song name", "aria-label": "YouTube link or song name" });
   const libraryList = element("ol", { className: "queuePanel-list", "aria-label": "Song library" });
   const libraryCount = element("span", { text: "Library" });
   let libraryKey = "";
   const fileInput = element("input", { type: "file", accept: "audio/*,video/mp4" });
   const status = element("p", { className: "queuePanel-status", hidden: "" });
-  const vibeInput = element("input", { type: "text", placeholder: "DJ vibe, e.g. chill house into hype EDM" });
+  const vibeInput = element("input", { type: "text", placeholder: "DJ vibe, e.g. chill house into hype EDM", "aria-label": "DJ vibe" });
   const djButtons = element("span", { className: "queuePanel-actions" });
   const djRow = element("div", { className: "queuePanel-dj" }, [
     element("span", { className: "queuePanel-djLabel", text: "AI DJ" }),
@@ -1602,9 +1662,10 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
         element("strong", { text: download.title }),
         element("small", { text: download.fromDj ? `AI DJ · ${stageText}` : stageText }),
       ]),
-      progressBar(download.stage === "downloading" ? (download.percent ?? 0) : download.stage === "failed" ? 100 : null, {
-        fromDj: download.fromDj,
-      }),
+      // A failed download has no bar: a full one would look like a success.
+      ...(download.stage === "failed"
+        ? []
+        : [progressBar(download.stage === "downloading" ? (download.percent ?? 0) : null, { fromDj: download.fromDj })]),
     ]);
   }
 
