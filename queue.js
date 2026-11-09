@@ -1097,13 +1097,13 @@ const styles = `
 .upNext-strip[hidden], .upNext-toast[hidden] { display: none; }
 .upNext-line { display: flex; align-items: baseline; gap: 8px; min-width: 0; }
 .upNext-line strong { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.upNext-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: var(--between); white-space: nowrap; }
+.upNext-label { font-size: 11px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: #8a4510; white-space: nowrap; } /* text: a darker orange (AA); --between is for bars and borders */
 .upNext-genre { font-size: 11px; padding: 1px 7px; border-radius: 9px; border: 1px solid var(--border); color: var(--muted); white-space: nowrap; }
 .upNext-when { font-weight: 700; white-space: nowrap; }
 .upNext-slot { width: 100%; }
 .upNext-toast { padding: 8px 16px; font-size: 15px; font-weight: 800; }
 .queuePanel-djOption { display: flex; gap: 6px; align-items: center; font-size: 12px; color: var(--muted); cursor: pointer; }
-.queuePanel-djLabel { font-size: 12px; font-weight: 700; color: var(--between); white-space: nowrap; }
+.queuePanel-djLabel { font-size: 12px; font-weight: 700; color: #8a4510; white-space: nowrap; }
 .queuePanel-status { margin: 0; font-size: 12px; color: var(--muted); overflow-wrap: anywhere; }
 .queuePanel-status.error { color: #b00020; } /* 7:1 on the cream panel (WCAG AA needs 4.5:1) */
 .queuePanel-list, .queuePanel-downloads {
@@ -1129,7 +1129,7 @@ const styles = `
 .queuePanel-track { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .queuePanel-track strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .queuePanel-track small { font-size: 11px; color: var(--muted); overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
-.queuePanel-row.current small { color: var(--between); font-weight: 600; }
+.queuePanel-row.current small { color: #8a4510; font-weight: 600; }
 .queuePanel-row.fromDj small::before { content: "✦ "; color: var(--between); }
 .queuePanel-row.failed small { color: #b00020; }
 .queuePanel-actions { display: flex; gap: 4px; }
@@ -1145,10 +1145,10 @@ const styles = `
 .queuePanel-library summary span { flex: 1; }
 .queuePanel-library .queuePanel-list { margin-top: 6px; }
 .queuePanel-row.librarySong { cursor: default; }
-.queuePanel-row.missing small { color: #94500f; } /* a dark orange: --between is about 2.5:1 on cream */
+.queuePanel-row.missing small { color: #7a3f08; } /* a dark orange: --between is about 2.5:1 on cream, and #94500f misses AA on the glass */
 .queuePanel-beta { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
 .queuePanel-betaLabel { font-size: 12px; font-weight: 600; color: var(--muted); }
-.queuePanel-betaLabel b { color: var(--between); }
+.queuePanel-betaLabel b { color: #8a4510; }
 
 /* Progress bars: downloads, loading, and the player's song position. */
 .queuePanel-bar { position: relative; height: 5px; border-radius: 3px; overflow: hidden; background: var(--border); }
