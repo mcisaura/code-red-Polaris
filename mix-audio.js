@@ -279,7 +279,7 @@ export function analyzeTempo(buffer) {
     rough = center;
     // Octave check: a fast tempo (drum & bass) scores like its half, since every other beat
     // repeats just as well. Prefer the double only when its own one-beat lag is clearly stronger (1.25x)
-    // as the half's; a real slow song has nothing at the half-beat lag, so it stays put.
+    // than the half's; a real slow song has nothing at the half-beat lag, so it stays put.
     if (rough * 2 <= 180) {
       let dbl = -1, dblBpm = rough * 2;
       for (let bpm = rough * 2 - 2; bpm <= rough * 2 + 2; bpm += 0.1) {
