@@ -215,9 +215,11 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
       show(`
         <div class="djStart-panel">
           <p class="djStart-status">${escape(reason)}</p>
-          <button class="lime" type="button">Try again</button>
+          <div class="djStart-row"><button class="secondary" type="button" data-new>New set</button>
+          <button class="lime" type="button" data-retry>Try again</button></div>
         </div>`);
-      root.querySelector("button").addEventListener("click", cameraStep, { once: true });
+      root.querySelector("[data-new]").addEventListener("click", setSelect, { once: true });
+      root.querySelector("[data-retry]").addEventListener("click", cameraStep, { once: true });
       return;
     }
     handCheck();
@@ -273,7 +275,7 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
   function showLoadError(error, retry) {
     show(`<div class="djStart-panel"><h1>Music couldn't load</h1>
       <p>${escape(error?.message || "Try another set or check the local server.")}</p>
-      <p class="djStart-hint">Check your internet connection, or pick other songs. To get every song onto this computer at once, run <code>python prefetch.py</code>.</p>
+      <p class="djStart-hint">${error?.detail ? `${escape(error.detail)}${/[.!?]$/.test(error.detail) ? "" : "."} ` : "Check your internet connection, or pick other songs. "}To get every song onto this computer at once, run <code>python prefetch.py</code>.</p>
       <div class="djStart-row"><button type="button" class="secondary" data-new>New set</button>
       <button type="button" class="lime" data-retry>Try again</button></div></div>`);
     root.querySelector("[data-new]").addEventListener("click", setSelect, { once: true });
@@ -282,7 +284,10 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
 
   async function ready() {
     const mine = ++run;
-    show(`<div class="djStart-panel"><p class="djStart-status">Getting the music ready…</p><p class="djStart-loading" aria-live="polite"></p></div>`);
+    show(`<div class="djStart-panel"><p class="djStart-status">Getting the music ready…</p><p class="djStart-loading" aria-live="polite"></p>
+      <button class="secondary" type="button" data-cancel>New set</button></div>`);
+    // Back to the picker: setSelect starts a newer run, so this load finishing later starts nothing.
+    root.querySelector("[data-cancel]").addEventListener("click", setSelect, { once: true });
     const line = root.querySelector(".djStart-loading");
     const timer = setInterval(() => {
       line.textContent = loadingText() ?? "";
@@ -323,16 +328,16 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
   }
 
   // ---- paused (Space / P on the page, or its Pause button)
-  function paused({ resume, restart, newSet }) {
+  function paused({ resume, restart, newSet, title = "Paused", text = null, resumeLabel = "Resume ▶" }) {
     run += 1; // a countdown still going (say, resuming) stops
     show(`
       <div class="djStart-panel">
-        <h1>Paused</h1>
-        <p><kbd>Space</kbd> to resume · <kbd>R</kbd> to restart the set</p>
+        <h1>${escape(title)}</h1>
+        <p>${text ? escape(text) : "<kbd>Space</kbd> to resume · <kbd>R</kbd> to restart the set"}</p>
         <div class="djStart-row">
           <button class="secondary" type="button" data-new>New set</button>
           <button class="secondary" type="button" data-restart>Restart</button>
-          <button class="lime" type="button" data-resume>Resume ▶</button>
+          <button class="lime" type="button" data-resume>${escape(resumeLabel)}</button>
         </div>
       </div>`);
     root.querySelector("[data-resume]").addEventListener("click", resume, { once: true });

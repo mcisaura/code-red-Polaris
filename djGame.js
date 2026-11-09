@@ -123,6 +123,8 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
 
   let mix = null; // the next mix: planned on the playing song, then performed in real time
   let pausedAt = null; // performance.now() when paused (the audio clock is suspended too)
+  let finishing = false; // the last song is fading out: the set can't be paused or restarted any more
+  const finaleFadeSeconds = 3; // queue.endSet's fade; the last song's cue leaves room for it
   const freshScore = () => ({ combo: 0, best: 0, hits: 0, judged: 0, points: 0, hype: 0.5, perfect: 0, good: 0, miss: 0 });
   const score = freshScore();
   const effects = [];
@@ -415,7 +417,9 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
     if (!next) {
       let end = onBar(mixOut);
       while (end < playback.position + leadBars * bar) end += phraseBars * bar;
-      mix = { song: playback.songId, state: "finale", bar, cue: Math.min(end, playback.duration - 1) };
+      // The deck loops its source, so the fade must finish before the buffer ends (short songs).
+      const latest = Math.max(0, playback.duration - finaleFadeSeconds - 0.5);
+      mix = { song: playback.songId, state: "finale", bar, cue: Math.min(end, latest) };
       return;
     }
     let cue = onBar(mixOut - (gap + outBars) * bar);
@@ -548,6 +552,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
   function finishSet() {
     finishMix();
     enabled = false;
+    finishing = true;
     queue.holdControls({});
     const results = {
       score: Math.round(score.points * 100),
@@ -559,7 +564,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
       judged: score.judged, // 0: nothing was judged (no one in frame, say), so there's no grade
     };
     const mine = generation;
-    queue.endSet().then((ended) => {
+    queue.endSet(finaleFadeSeconds * 1000).then((ended) => {
       if (mine === generation && ended !== false) onSetEnd(results);
     });
   }
@@ -947,9 +952,14 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
     get paused() {
       return pausedAt !== null;
     },
+    // The last song is fading out and the results are about to show.
+    get finishing() {
+      return finishing;
+    },
     // A fresh start for a new set (or the same one again): score, chart and mix cleared.
     reset() {
       generation += 1;
+      finishing = false;
       songStarts.clear();
       songShares.clear();
       if (pausedAt !== null) deck?.ctx?.resume();

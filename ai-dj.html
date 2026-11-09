@@ -337,10 +337,12 @@ async function startCamera() {
       audio: false,
     });
     video.srcObject = stream;
+    // Unplugged, or permission revoked: the game runs on camera frames, so say so.
+    for (const track of stream.getVideoTracks()) track.addEventListener("ended", () => cameraStopped());
     await video.play();
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
-    $("placeholder").remove();
+    $("placeholder")?.remove();
     startBtn.textContent = "Camera on";
     calibBtn.disabled = false;
     scheduleFrame();
@@ -370,6 +372,7 @@ function onFrame() {
   if (video.currentTime !== lastVideoTime) {
     lastVideoTime = video.currentTime;
     const now = performance.now();
+    lastCameraFrame = now;
     update(landmarker.detectForVideo(video, now), now);
     updateFps(now);
   }
@@ -834,6 +837,8 @@ const djGame = createDjGame(queue, {
     betweenOpen: BETWEEN_OPEN,
   }),
   onSetEnd: (results) => {
+    if (djGame.paused) djGame.reset(); // results always come from a clean, unpaused state
+    cameraLost = false;
     inSet = false;
     phase = "playing";
     updateSetButtons();
@@ -869,10 +874,14 @@ const screens = createStartScreen(stage, {
     await queue.playSet(ids);
     try {
       await queue.readyToStart();
-    } catch {
+    } catch (cause) {
       const first = queue.getState().items[0];
       const name = first ? first.title.split(" - ").slice(1).join(" - ") || first.title : "the first song";
-      throw new Error(`Couldn't download ${name}${/[.!?]$/.test(name) ? "" : "."}`);
+      // A song that downloaded but won't decode isn't a download problem.
+      const decoding = cause?.name === "EncodingError" || /decod/i.test(cause?.message || "");
+      const error = new Error(`Couldn't ${decoding ? "load" : "download"} ${name}${/[.!?]$/.test(name) ? "" : "."}`);
+      error.detail = cause?.message || "";
+      throw error;
     }
   },
   begin: () => {
@@ -880,6 +889,7 @@ const screens = createStartScreen(stage, {
     queue.beginSet();
     inSet = true;
     phase = "playing";
+    lastCameraFrame = performance.now();
     updateSetButtons();
   },
 });
@@ -889,6 +899,9 @@ const screens = createStartScreen(stage, {
 // 3-2-1 before it resumes); "resuming" (the count is done and the audio is waking up).
 let inSet = false; // a set is playing (or paused)
 let phase = "playing";
+let lastCameraFrame = performance.now(); // when the camera last gave a new frame
+let cameraLost = false; // the set is paused because the camera stopped
+const cameraStallMs = 4000; // no frames this long while playing: the camera has stopped
 let pauseAfterResume = false; // pause pressed while resuming: pause as soon as it's going
 function updateSetButtons() {
   $("pauseBtn").disabled = !inSet;
@@ -896,7 +909,7 @@ function updateSetButtons() {
   $("pauseBtn").textContent = phase === "paused" ? "▶ Resume" : "⏸ Pause";
 }
 function pauseSet() {
-  if (!inSet) return;
+  if (!inSet || djGame.finishing) return; // the finale's fade: nothing to pause
   if (phase === "counting") {
     phase = "paused"; // back to the Paused panel: the count-in stops (screens.paused cancels it)
   } else if (phase === "resuming") {
@@ -912,8 +925,44 @@ function pauseSet() {
   screens.paused({ resume: resumeSet, restart: restartSet, newSet: leaveSet });
   updateSetButtons();
 }
+// The camera stopped mid-set: pause with a clear message (the game only moves on camera frames).
+function cameraStopped(note) {
+  if (!inSet || phase !== "playing" || djGame.finishing || !djGame.pause()) return;
+  phase = "paused";
+  cameraLost = true;
+  showCameraStopped(note);
+  updateSetButtons();
+}
+function showCameraStopped(note) {
+  screens.paused({
+    resume: resumeSet,
+    restart: restartSet,
+    newSet: leaveSet,
+    title: "Camera stopped",
+    text: note || "The camera stopped, so the game can't see your hands. Check it's plugged in and allowed, then try again.",
+    resumeLabel: "Try camera ▶",
+  });
+}
+async function recoverCamera() {
+  video.srcObject?.getTracks().forEach((track) => track.stop());
+  video.srcObject = null;
+  const result = await startCamera();
+  if (!inSet || phase !== "paused") return;
+  if (result !== true) {
+    showCameraStopped(result); // still no camera: the reason, and the buttons again
+    return;
+  }
+  cameraLost = false;
+  lastCameraFrame = performance.now();
+  resumeSet();
+}
+function checkCameraStall(now = performance.now()) {
+  if (!inSet || phase !== "playing" || djGame.finishing) lastCameraFrame = now; // only playing time counts
+  else if (now - lastCameraFrame > cameraStallMs) cameraStopped();
+}
 function resumeSet() {
   if (phase !== "paused") return;
+  if (cameraLost) return void recoverCamera();
   phase = "counting";
   updateSetButtons();
   screens.countIn(async () => {
@@ -929,6 +978,7 @@ function resumeSet() {
   });
 }
 async function stopSet() {
+  cameraLost = false;
   screens.cancel(); // invalidate resume/countdown callbacks before the async fade
   inSet = false;
   phase = "playing";
@@ -939,7 +989,7 @@ async function stopSet() {
   await queue.endSet(250);
 }
 async function restartSet() {
-  if (!inSet) return;
+  if (!inSet || djGame.finishing) return;
   await stopSet();
   screens.replay();
 }
@@ -979,6 +1029,7 @@ function updateSongCard() {
   songStatus.classList.toggle("error", Boolean(status?.isError));
 }
 queue.on(updateSongCard);
+setInterval(() => checkCameraStall(), 1000);
 
 startBtn.addEventListener("click", () => ensureModel().then(startCamera, () => {}));
 calibBtn.addEventListener("click", calibrate);

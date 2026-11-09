@@ -27,7 +27,7 @@ const screens = {
   cancel() { pendingGo = null; }, replay() {}, newSet() {},
 };
 const box = {
-  console, setImmediate,
+  console, setImmediate, performance,
   djGame: game, screens,
   queue: { endSet: async () => {} },
   $,
