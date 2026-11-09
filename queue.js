@@ -263,7 +263,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   }
   let playsPending = 0;
   let defaultQueueStarting = null;
-  let playChain = Promise.resolve();
+  let loadingRequest = 0; // the request that owns loadingId
 
   // mix: false, or { mixOutAt } to mix into the song (see transitions.mixInto).
   // entry: start where the song gets going (short mixes) instead of at 0.
@@ -272,10 +272,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     const request = ++playRequest;
     requestedId = id;
     playsPending += 1;
-    playChain = playChain
-      .then(() => (request === playRequest ? loadAndPlay(id, { mix, entry, request }) : undefined))
-      .finally(() => (playsPending -= 1));
-    return playChain;
+    // Not serialized: a superseded load (maybe a long download) must not hold up the newest
+    // request. loadAndPlay drops anything superseded once its decode finishes.
+    return loadAndPlay(id, { mix, entry, request }).finally(() => (playsPending -= 1));
   }
 
   // Resolves startHandMix()'s promise with the hand controls once the mix is scheduled.
@@ -510,6 +509,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     const item = items.find((entry) => entry.id === id);
     if (!item) return;
     loadingId = id;
+    loadingRequest = request;
     changed();
     try {
       const buffer = await decode(item);
@@ -517,7 +517,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       if (request !== playRequest || !items.some((entry) => entry.id === id)) return;
       deck.ensureContext();
       if (mix && deck.playing) {
-        loadingId = null;
+        if (loadingRequest === request) loadingId = null;
         changed();
         const from = items.find((entry) => entry.id === currentId);
         const mixed = await transitions.mixInto(buffer, {
@@ -548,7 +548,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     } catch (error) {
       if (request === playRequest) status = { message: `Error: ${error.message}`, isError: true };
     } finally {
-      if (loadingId === id) loadingId = null;
+      if (loadingId === id && loadingRequest === request) loadingId = null;
       changed();
     }
   }
@@ -656,7 +656,13 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Adds the whole library in order.
     async addAllFromLibrary() {
       await libraryReady;
-      for (const song of library) await queue.addFromLibrary(song.id);
+      // Added at once and lazily, like startDefaultQueue: uncached songs (url: null) download
+      // only when decode() reaches them. The first one still autoplays, as before.
+      for (const song of library) add({
+        title: `${song.artist} - ${song.title}`, detail: "Library",
+        libraryId: song.id, bpm: song.bpm, genre: song.genre, defaultLibrary: true,
+        url: song.available !== false ? song.file : null,
+      });
     },
 
     // Moves an item to a new position (0 = top).
@@ -1235,8 +1241,19 @@ export function createTransport(queue, deck, { onNext = () => queue.next() } = {
     dragRatio = ratioAt(event);
   });
   seek.addEventListener("pointermove", (event) => {
-    if (dragRatio !== null) dragRatio = ratioAt(event);
+    if (dragRatio === null) return;
+    // Only while dragging: pointer captured, or a button still held.
+    let dragging = event.buttons !== 0;
+    try {
+      dragging = dragging || seek.hasPointerCapture(event.pointerId);
+    } catch {
+      // No capture support: fall back to buttons.
+    }
+    dragRatio = dragging ? ratioAt(event) : null;
   });
+  const endDrag = () => { dragRatio = null; };
+  seek.addEventListener("pointercancel", endDrag);
+  seek.addEventListener("lostpointercapture", endDrag);
   seek.addEventListener("pointerup", (event) => {
     if (dragRatio === null) return;
     const ratio = ratioAt(event);
