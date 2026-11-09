@@ -31,11 +31,11 @@
 - `djGame.js` / `djStart.js`: AirMix gameplay, set selection, onboarding and results.
 - `arcade-versus.html`: two-player Arcade games.
 - `landing.html` / `landing.js`: the homepage; `club.html` / `club.js`: the preserved 3D Club demo; `aero.css`: shared Aero styling.
-- `server.py`: local serving/downloads, Gemini picks, ElevenLabs speech; loads a gitignored `.env` at startup.
+- `server.py`: local serving/downloads and the offline AI DJ song picker (`/api/dj/pick`); Gemini and ElevenLabs were removed (restore from git history); loads a gitignored `.env` at startup.
 - `FEATURES_PLAN.md` is historical, not the current product specification.
 
 Run the regression suites (all are fast): `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done`, then `python3 tests/server-static.py` and `python3 tests/server-requests.py`; run `git diff --check`. Changes to `analyzeTempo` must keep `tests/tempo-accuracy.cjs` (35 synthetic tempos, ±1 BPM) and `tests/tempo-silence.cjs` passing. Browser checks matter for rendering and fullscreen. Stub tests do not replace real webcam/listening validation.
 
 AirMix may select uncached library songs; they download on Play. Loading failures must show retry/new-set controls. The server must never serve dotfiles (including `.env` and `.git`) or directory listings.
 
-Run `python3 server.py 8001` after checking for an existing listener. Keys are server environment variables (`GEMINI_API_KEY`, `ELEVENLABS_API_KEY`); never reveal or commit secrets. The API only answers requests whose `Host` is localhost, 127.0.0.1 or `AIRDECK_HOST`; to use it from another computer, set `AIRDECK_HOST` to this machine's LAN IP (with 0.0.0.0 other computers get 403). Do not claim APIs are active just because integration exists. Check runtime configuration/logs.
+Run `python3 server.py 8001` after checking for an existing listener. No external AI service or API key is used; never add one without the owner asking, and never commit secrets. The API only answers requests whose `Host` is localhost, 127.0.0.1 or `AIRDECK_HOST`; to use it from another computer, set `AIRDECK_HOST` to this machine's LAN IP (with 0.0.0.0 other computers get 403).

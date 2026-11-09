@@ -49,7 +49,7 @@ Requirements: Python 3, [yt-dlp](https://github.com/yt-dlp/yt-dlp) (`brew instal
 python3 server.py
 ```
 
-If you see 404s or the wrong page, another `server.py` (e.g. a second copy of the repo) has the port: stop it, or run `python server.py 8001`.
+The AI DJ works offline, with no API keys. If you see 404s or the wrong page, another `server.py` (e.g. a second copy of the repo) has the port: stop it, or run `python server.py 8001`.
 
 Open http://localhost:8000 in Chrome and choose **DJ Deck**. Click **Start camera**; **Show controls & help** contains calibration and advanced controls. Pick
 songs from the **Library** (▶ plays one now, + adds it, **Add all** queues them all), or let the AI DJ choose. Drag
@@ -77,10 +77,11 @@ YouTube downloads can take 10–30 seconds, with a progress bar.
 
 ### AI DJ
 
-In the Queue panel, type a vibe (e.g. "chill into hype") and press **Start**. Gemini picks songs from the library that
-fit the vibe and flow from what's playing: same or neighboring genre, close tempo, no repeats until every song has
-played. With the DJ on, it mixes into the next song before the current one's ending fades out (it keeps two queued
-ahead), and a DJ voice speaks up over the mix when the genre switches (and at the start of the set):
+In the Queue panel, type a vibe (e.g. "chill into hype") and press **Start**. The server picks songs from the library
+that flow from what's playing, offline: the same genre first, then the closest tempo, with no repeats until every song
+has played (a word of your vibe, like "hip-hop", chooses the opening song). With the DJ on, it mixes into the next song
+before the current one's ending fades out (it keeps two queued ahead), and your browser's built-in voice speaks up over
+the mix when the genre switches (and at the start of the set):
 
 - **Blend** when the tempos are close: the next song comes in beat-matched on a downbeat, the two swap bass lines
   halfway, and the new song then eases back to its own tempo.
@@ -133,27 +134,18 @@ together, even mid-mix, and a quick 3-2-1 brings them back. **R** (or Restart) p
 Switching tabs pauses too. Targets stay in the middle of the camera view (about 18–82% across, 28–68% down), where
 the hand tracking is steady.
 
-The AI doesn't pick anything in AirMix; it only talks: with an ElevenLabs key, a DJ voice opens the set, calls out
-genre switches and your result. Without a key it stays quiet.
+The AI doesn't pick anything in AirMix, and it stays quiet: no voice, just the music and your hands.
+AirMix lives at `ai-dj.html`. DJ Deck (`index.html`) exposes AI DJ tools through **AI DJ & import** in its sidebar.
 
-It needs API keys. The easy way: copy `.env.example` to `.env` and put your keys in it; `server.py` reads it every
-time it starts (`.env` is gitignored, so the keys never get pushed, and the server blocks browser requests for it).
-Or set them in the terminal before starting the
-server, which only lasts for that window (either way they stay on your machine and never reach the browser):
+### API keys and network access
 
-```bash
-export GEMINI_API_KEY="..." ELEVENLABS_API_KEY="..."   # PowerShell: $env:GEMINI_API_KEY="..."; $env:ELEVENLABS_API_KEY="..."
-python3 server.py
-```
-
-If Gemini can't be reached (no key, no internet, rate limit, overload), the DJ keeps going with the closest
-library songs by genre and tempo, and says so. The server prints whether Gemini is on. Without an ElevenLabs key the browser's built-in voice is used. Optional:
-`GEMINI_MODEL` (default `gemini-3.5-flash-lite`, 500 free requests a day) and `ELEVENLABS_VOICE_ID`.
-The server only answers this computer, so nobody on the venue Wi-Fi can spend your API credits, and only AirDeck's
+No API keys are needed: the Gemini and ElevenLabs integrations were retired (the AI DJ picks songs with a local
+picker, and speaks with the browser's voice). The code can be restored from git history if they're wanted again.
+`server.py` still reads an optional `.env` at startup (see `.env.example`) for `AIRDECK_HOST`.
+The server only answers this computer, so nobody on the venue Wi-Fi can use it, and only AirDeck's
 own pages may call its API. To use it from another computer, set `AIRDECK_HOST` to this machine's IP on the network
 (e.g. `AIRDECK_HOST=192.168.1.20`) and open `http://192.168.1.20:8000` there. With `AIRDECK_HOST=0.0.0.0` the pages
 load elsewhere but the API answers 403, because it only accepts its own names in the `Host` header.
-AirMix lives at `ai-dj.html`. DJ Deck (`index.html`) exposes AI DJ tools through **AI DJ & import** in its sidebar.
 
 ### Files
 
@@ -176,7 +168,7 @@ AirMix lives at `ai-dj.html`. DJ Deck (`index.html`) exposes AI DJ tools through
 - `mix-audio.js`: `analyzeTempo`, the tempo and downbeat detection the mixes use (the rest is the archived two-deck engine)
 - `djGame.js`: AirMix's game: the chart, hits and their sounds, the playable mixes, the set's end, the Your set card
 - `djStart.js`: AirMix's screens: pick your set, how to play, camera and hand check, loading, 3-2-1, results
-- `server.py`: local server; serves the site, downloads YouTube audio via yt-dlp into `downloads/`, and runs the AI DJ (Gemini picks, ElevenLabs voice)
+- `server.py`: local server; serves the site, downloads YouTube audio via yt-dlp into `downloads/`, and picks the AI DJ's songs from the library (offline)
 - `library.json`, `prefetch.py`: the song library and a script that fills `music/` with it
 - `tests/`: regression tests, no browser or camera needed. Run them all with
   `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done` and `python3 tests/server-static.py`,

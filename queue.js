@@ -2,9 +2,9 @@
 // (library.json, played from music/<id>.m4a, instant); YouTube links or song
 // names (downloaded by server.py, slow) and files are a beta alternative.
 // Reorder, remove, play, seek, and skip back and forth. An AI DJ can fill it for
-// you: Gemini picks library songs that fit a vibe and what's playing, and a voice
-// (ElevenLabs, or the browser's) introduces each one. Plus a floating panel and a
-// player bar for all of that.
+// you: the server picks library songs that fit a vibe and what's playing (same
+// genre, close tempo, no repeats until every song has played), and the browser's
+// voice introduces them. Plus a floating panel and a player bar for all of that.
 //
 //   const queue = createQueue(deck);
 //   const panel = createQueuePanel(queue, deck);
@@ -24,7 +24,6 @@ const djPicksPerRequest = 3;
 const duckedVolume = 0.5; // the music's level while the DJ talks over a transition
 const duckFadeMs = 600;
 const voiceTimeoutMs = 15000; // never let a stuck voice line stall the set
-const voiceWaitMs = 4000; // longest wait for the ElevenLabs clip before using the browser's voice
 const restartThreshold = 3; // ⏮ restarts the song if it's past this many seconds, else goes back one
 const progressPollMs = 400;
 const hoverDecodeMs = 250; // hovering a song this long starts decoding it
@@ -44,7 +43,7 @@ async function retryOnNetworkError(request) {
 
 export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json" } = {}) {
   // Items: { id, title, detail, url } for YouTube, { id, title, detail, file } for files.
-  // DJ picks also carry dj: { intro, voice }, voice being the ElevenLabs clip once it's asked for.
+  // DJ picks also carry dj: { intro, reason }, and browserVoice: false for AirMix sets (which stay quiet).
   let items = [];
   let currentId = null;
   // The song the last play request asked for: loading, or failed. ⏭ and ⏮ step from it
@@ -338,28 +337,12 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
   // ---- AI DJ ----------------------------------------------------------------------
 
-  // An AirMix set's DJ line for a song (spoken as it comes in, if the genre changed).
+  // An AirMix set's DJ line for a song (kept with the song, but AirMix doesn't speak it).
   function setLine(song, previous) {
     const name = `${song.title} by ${song.artist}`;
     if (!previous) return `Welcome to AirMix! Hands up. First up: ${name}.`;
     const genre = (song.genre ?? "").split("/")[0].trim();
     return genre ? `Switching it up, ${genre} time: ${name}!` : `Next up: ${name}!`;
-  }
-
-  // The ElevenLabs clip's URL for a DJ line, or null to fall back to the browser's voice.
-  async function prepareVoice(text) {
-    try {
-      return (await postJson("/dj/voice", { text })).file;
-    } catch (error) {
-      console.warn("DJ voice unavailable, using the browser voice:", error.message);
-      return null;
-    }
-  }
-
-  // Only asked for once the line will be spoken (it costs ElevenLabs credits).
-  function voiceFor(item) {
-    item.dj.voice ??= prepareVoice(item.dj.intro);
-    return item.dj.voice;
   }
 
   // The DJ only speaks up when the set changes direction: its first song, and genre
@@ -374,24 +357,18 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     return before.length > 0 && after.length > 0 && !after.some((genre) => before.includes(genre));
   }
 
-  // Whether a line will actually be heard: lines without the browser voice to fall back
-  // on (an AirMix set's) need their ElevenLabs clip, so the music isn't ducked for nothing.
-  async function canSpeak(item) {
-    if (item.dj?.browserVoice !== false) return true;
-    const late = new Promise((resolve) => setTimeout(() => resolve(null), voiceWaitMs));
-    return Boolean(await Promise.race([voiceFor(item), late]));
+  // Whether a line will actually be heard (the browser has a voice, and the item isn't
+  // an AirMix set's, which stays quiet), so the music isn't ducked for nothing.
+  function canSpeak(item) {
+    return item.dj?.browserVoice !== false && "speechSynthesis" in window;
   }
 
-  // Plays a DJ line and resolves when it's done (or after a timeout).
+  // Says a DJ line with the browser's voice and resolves when it's done (or after a timeout).
   async function speak(item, stillWanted = () => true) {
     const intro = item.dj?.intro;
-    if (!intro) return;
-    // The clip is normally ready (asked for while the song before played); never wait long for it.
-    const late = new Promise((resolve) => setTimeout(() => resolve(null), voiceWaitMs));
-    const voiceUrl = await Promise.race([voiceFor(item), late]);
-    if (!stillWanted()) return;
+    if (!intro || !canSpeak(item) || !stillWanted()) return;
     return new Promise((resolve) => {
-      let audio = null, line = null, finished = false;
+      let line = null, finished = false;
       const cancel = () => {
         if (line) speechSynthesis.cancel();
         done();
@@ -402,23 +379,13 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         if (finished) return;
         finished = true;
         clearTimeout(timer);
-        audio?.pause();
         if (stopVoice === cancel) stopVoice = null;
         resolve();
       }
-      if (voiceUrl) {
-        audio = new Audio(voiceUrl);
-        audio.onended = done;
-        audio.onerror = done;
-        audio.play().catch(done);
-      } else if (item.dj.browserVoice !== false && "speechSynthesis" in window) {
-        line = new SpeechSynthesisUtterance(intro);
-        line.onend = done;
-        line.onerror = done;
-        speechSynthesis.speak(line);
-      } else {
-        done();
-      }
+      line = new SpeechSynthesisUtterance(intro);
+      line.onend = done;
+      line.onerror = done;
+      speechSynthesis.speak(line);
     });
   }
 
@@ -437,7 +404,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       // entry with short mixes. Either way the DJ talks over the music, not before it.
       await playItem(item.id, mixing ? { mix: { mixOutAt, startAt, style, hands } } : { entry: dj.short });
       if (!ownsTransition() || currentId !== item.id) return;
-      if (talks && (await canSpeak(item))) {
+      if (talks && canSpeak(item)) {
         if (!ownsTransition() || currentId !== item.id) return;
         dj.talking = true;
         changed();
@@ -469,28 +436,24 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     let added = 0;
     try {
       const current = items.find((item) => item.id === currentId);
-      // With a library, the DJ only picks from it (instant, nothing to download).
-      // Without one it can pick any song, downloaded from YouTube (the slow beta path).
-      const useLibrary = library.length > 0;
-      const { picks, offline } = await postJson("/dj/pick", {
+      // The DJ only picks from the library (instant, nothing to download).
+      if (!library.length) throw new Error("the song library isn't loaded");
+      const { picks } = await postJson("/dj/pick", {
         vibe: dj.vibe,
         nowPlaying: current?.title ?? "",
         queued: items.map((item) => item.title),
         crowd: dj.crowd,
         played,
         count: djPicksPerRequest,
-        ...(useLibrary && { library: library.map(({ id, artist, title, bpm, genre }) => ({ id, artist, title, bpm, genre })) }),
+        library: library.map(({ id, artist, title, bpm, genre }) => ({ id, artist, title, bpm, genre })),
       });
-      // Every pick gets ready (and gets its voice line) at the same time; they join
-      // the queue in pick order.
+      // Every pick gets ready at the same time; they join the queue in pick order.
       setDjStatus(`Getting ${picks.length} songs ready…`);
       const jobs = picks.map((pick) => {
         const label = `${pick.artist} - ${pick.title}`;
         const detail = `AI DJ · ${pick.reason}`;
-        const librarySong = useLibrary && library.find((song) => song.id === pick.id);
-        const song = librarySong
-          ? libraryEntry(librarySong, detail)
-          : downloadYouTube(label, { title: label, detail, fromDj: true }).then((download) => ({ title: label, detail, url: download.file }));
+        const librarySong = library.find((song) => song.id === pick.id);
+        const song = librarySong ? libraryEntry(librarySong, detail) : Promise.reject(new Error("not in the library"));
         return song.then(
           (entryData) => ({ pick, label, entryData }),
           (error) => ({ label, error }),
@@ -506,7 +469,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         const entry = add(
           {
             ...entryData,
-            dj: { intro: pick.intro, voice: null, reason: pick.reason },
+            dj: { intro: pick.intro, reason: pick.reason },
           },
           { autoplay: false },
         );
@@ -515,9 +478,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         if (currentId === null && !transitioning && !dj.waitToStart) transitionTo(entry);
       }
       if (stillValid() && !added) throw new Error("none of the picks could be loaded");
-      // Gemini was unreachable: the server picked the closest library songs instead.
-      const why = offline?.includes("GEMINI_API_KEY") ? "no Gemini key" : offline;
-      setDjStatus(offline ? `AI offline (${why}): picking from the library by genre and tempo.` : null);
+      setDjStatus(null);
     } catch (error) {
       if (dj.generation === generation) dj.busy = false;
       setDjStatus(`AI DJ: ${error.message}`, true);
@@ -539,7 +500,6 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     if (!dj.on || transitioning || !deck.playing || !deck.buffer) return;
     const next = upcoming()[0];
     if (!next) return;
-    if (djSpeaksBefore(next, items.find((entry) => entry.id === currentId))) voiceFor(next);
     if (!coached() && position() >= transitions.mixPoint(deck.buffer, dj.short)) {
       transitionTo(next, { mixOutAt: transitions.mixOutPoint(deck.buffer, dj.short) });
     }
@@ -815,10 +775,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
     // AirMix: a set of library songs (ids, in order) your hands play through. The queue
     // becomes exactly that set and the mixes work as with the DJ, but nothing gets picked:
-    // the AI only talks (ElevenLabs, if there's a key; otherwise it stays quiet) as the set
-    // starts and when the genre changes. A song not in music/ yet downloads when it's
-    // needed (the first one right away, each next one while the one before plays), as in
-    // the DJ Deck's default queue. Call beginSet() to play it.
+    // the set's lines are not spoken (AirMix stays quiet). A song not in music/ yet
+    // downloads when it's needed (the first one right away, each next one while the one
+    // before plays), as in the DJ Deck's default queue. Call beginSet() to play it.
     async playSet(ids) {
       cancelEnding();
       cancelTransition();
@@ -843,7 +802,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
             genre: song.genre,
             defaultLibrary: true, // decode() downloads it if it isn't in music/
             url: song.available ? song.file : null,
-            dj: { intro: setLine(song, songs[index - 1]), voice: null, reason: null, browserVoice: false },
+            dj: { intro: setLine(song, songs[index - 1]), reason: null, browserVoice: false },
           },
           { autoplay: false },
         );
@@ -882,11 +841,6 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Whether a queued song's download or decoding failed.
     loadFailed(id) {
       return loadFailed.has(id);
-    },
-
-    // Says a line in the DJ's voice (ElevenLabs only; quiet without a key).
-    say(text) {
-      return speak({ dj: { intro: text, voice: null, browserVoice: false } });
     },
 
     stopDj() {

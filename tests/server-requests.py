@@ -1,22 +1,17 @@
-"""Exercise real HTTP handlers in memory; no sockets, downloads, or paid API calls."""
+"""Exercise real HTTP handlers in memory; no sockets or downloads."""
 import contextlib
-import http.client
 import importlib.util
 import io
 import json
 import os
 import sys
 import tempfile
-import urllib.error
-import urllib.request
 from pathlib import Path
 from email.message import Message
 
 spec = importlib.util.spec_from_file_location('server', Path(__file__).resolve().parents[1] / 'server.py')
 server = importlib.util.module_from_spec(spec)
 spec.loader.exec_module(server)
-REAL_ASK = server.ask_gemini_for_picks
-server.ask_gemini_for_picks = lambda *args: [{"artist": "Test", "title": "Fixture", "reason": "", "intro": ""}]
 PORT = server.PORT
 LOCAL = f'localhost:{PORT}'
 
@@ -62,57 +57,14 @@ def env(**values):
 
 
 @contextlib.contextmanager
-def real_gemini():
-    """Use the real Gemini picker; its HTTP call is replaced by fake_http."""
-    fixture = server.ask_gemini_for_picks
-    server.ask_gemini_for_picks = REAL_ASK
-    try:
-        yield
-    finally:
-        server.ask_gemini_for_picks = fixture
-
-
-class FakeResponse:
-    def __init__(self, data):
-        self.data = data
-
-    def read(self):
-        return self.data
-
-    def __enter__(self):
-        return self
-
-    def __exit__(self, *exc):
-        return False
-
-
-@contextlib.contextmanager
-def fake_http(answer):
-    """The server's one outgoing HTTP call returns `answer` (bytes), or raises it if it is an exception."""
-    saved = urllib.request.urlopen
-
-    def urlopen(request, timeout=None):
-        if isinstance(answer, BaseException):
-            raise answer
-        return FakeResponse(answer)
-
-    urllib.request.urlopen = urlopen
-    try:
-        yield
-    finally:
-        urllib.request.urlopen = saved
-
-
-@contextlib.contextmanager
 def temp_site():
-    """Point the server's files (downloads, voice cache, index) at a temporary folder."""
-    names = ('ROOT', 'DOWNLOADS', 'VOICES', 'DOWNLOAD_INDEX')
+    """Point the server's files (downloads, index) at a temporary folder."""
+    names = ('ROOT', 'DOWNLOADS', 'DOWNLOAD_INDEX')
     saved = {name: getattr(server, name) for name in names}
     with tempfile.TemporaryDirectory() as temporary:
         root = Path(temporary)
         server.ROOT = root
         server.DOWNLOADS = root / 'downloads'
-        server.VOICES = server.DOWNLOADS / 'voice'
         server.DOWNLOAD_INDEX = server.DOWNLOADS / 'index.json'
         try:
             yield root
@@ -121,9 +73,16 @@ def temp_site():
                 setattr(server, name, value)
 
 
-def gemini_answer(text):
-    """A Gemini generateContent response whose only text is `text`."""
-    return json.dumps({'candidates': [{'content': {'parts': [{'text': text}]}}]}).encode()
+LIBRARY = [
+    {'id': 'abc123DEF45', 'artist': 'A', 'title': 'T', 'bpm': 120, 'genre': 'house'},
+    {'id': 'xyz987QRS65', 'artist': 'B', 'title': 'U', 'bpm': 122, 'genre': 'house'},
+    {'id': 'hhh111HHH11', 'artist': 'C', 'title': 'V', 'bpm': 90, 'genre': 'hip-hop'},
+]
+
+
+def pick(body, **options):
+    result, _ = request(json.dumps(body).encode(), **options)
+    return result[0]
 
 
 failures = []
@@ -140,7 +99,7 @@ for raw, length in [(b'{"count":"oops"}', None), (b'{"queued":null}', None),
 assert not failures, '\n'.join(failures)
 
 # Origin and Host: only this server's own names on its own port (DNS rebinding is refused).
-ok_body = b'{"count":1}'
+ok_body = json.dumps({'library': LIBRARY, 'count': 1}).encode()
 assert status_of(b'{}', origin='https://example.com') == 403
 assert status_of(ok_body, origin=f'http://localhost:{PORT}') == 200  # our own page
 assert status_of(ok_body, origin=f'http://127.0.0.1:{PORT}', host=f'127.0.0.1:{PORT}') == 200
@@ -161,66 +120,31 @@ handler.send_json = lambda status, body: answers.append(status)
 handler.do_GET()
 assert answers == [403], answers
 
-# Gemini failures become DjError (a clean 502, or the library's offline fallback). Never a crash.
-PROMPT = 'Vibe: test\nPick 1 songs.'
-with env(GEMINI_API_KEY='test-key'):
-    bad_answers = [
-        b'<html>Bad Gateway</html>',
-        b'{"candidates": []}',
-        gemini_answer('not json'),
-        gemini_answer('{"picks": "oops"}'),
-        gemini_answer('{"picks": [1, 2]}'),
-        gemini_answer('[1]'),
-        b'{"candidates": [{"content": {"parts": ["x"]}}]}',
-        http.client.RemoteDisconnected('closed'),
-        http.client.IncompleteRead(b'part'),
-        OSError('connection reset'),
-        ValueError('bad response'),
-        urllib.error.HTTPError('https://example.com', 503, 'busy', {}, io.BytesIO(b'{"error": {"message": "overloaded"}}')),
-    ]
-    for answer in bad_answers:
-        with fake_http(answer):
-            try:
-                REAL_ASK(PROMPT, server.PICK_SCHEMA)
-            except server.DjError:
-                continue
-        raise AssertionError(f'{answer!r} should be a DjError')
-    good = json.dumps({'picks': [{'artist': 'A', 'title': 'T', 'reason': 'r', 'intro': 'i'}]})
-    with fake_http(gemini_answer(good)):
-        assert REAL_ASK(PROMPT, server.PICK_SCHEMA) == [{'artist': 'A', 'title': 'T', 'reason': 'r', 'intro': 'i'}]
-    library = [{'id': 'abc123DEF45', 'artist': 'A', 'title': 'T', 'bpm': 120, 'genre': 'house'},
-               {'id': 'xyz987QRS65', 'artist': 'B', 'title': 'U', 'bpm': 122, 'genre': 'house'}]
-    library_body = json.dumps({'library': library, 'count': 1}).encode()
-    with real_gemini(), fake_http(urllib.error.URLError('no route to host')):
-        result, _ = request(library_body)
-    assert result[0][0] == 200 and result[0][1]['offline'] and result[0][1]['picks'][0]['id'] in {'abc123DEF45', 'xyz987QRS65'}, result
-    with real_gemini(), fake_http(gemini_answer('{"picks": "oops"}')):
-        result, _ = request(library_body)
-    assert result[0][0] == 200 and result[0][1]['offline'], result
-    with real_gemini(), fake_http(gemini_answer('{"picks": 5}')):
-        result, _ = request(b'{"count":1}')
-    assert result[0][0] == 502 and 'error' in result[0][1], result
+# Picks are always local: no keys, no network, the closest library songs.
+with env(GEMINI_API_KEY=None, ELEVENLABS_API_KEY=None):
+    status, body = pick({'library': LIBRARY, 'count': 3, 'nowPlaying': 'A - T', 'queued': [], 'played': ['A - T']})
+    assert status == 200 and set(body) == {'picks'}, (status, body)
+    ids = [p['id'] for p in body['picks']]
+    assert ids == ['xyz987QRS65', 'hhh111HHH11'], ids  # same genre first, no repeat of the playing song
+    assert all(p['reason'] and p['intro'] and 'offline' not in p['reason'].lower() for p in body['picks']), body
+    # The vibe picks the opening song when nothing is playing.
+    status, body = pick({'library': LIBRARY, 'count': 1, 'vibe': 'some hip-hop'})
+    assert status == 200 and body['picks'][0]['id'] == 'hhh111HHH11', body
+    # Every song played: repeats are allowed, the one played longest ago first.
+    status, body = pick({'library': LIBRARY, 'count': 1, 'played': ['A - T', 'B - U', 'C - V'], 'queued': []})
+    assert status == 200 and body['picks'][0]['id'] == 'abc123DEF45', body
+    # No library: a clear 400, never a call to an outside service.
+    for raw in [{'count': 1}, {'library': []}, {'library': [{'artist': 'no id'}]}]:
+        status, body = pick(raw)
+        assert status == 400 and 'library' in body['error'], (raw, status, body)
 
-# A missing API key is a 503 (library mode still falls back to the offline picks).
-with env(GEMINI_API_KEY=None), real_gemini():
-    assert status_of(b'{"count":1}') == 503
-    assert status_of(library_body) == 200
-
-# Voice: 503 without a key, 400 for empty text, only real audio is cached.
-with temp_site(), env(ELEVENLABS_API_KEY=None):
-    assert status_of(b'{"text":"hi"}', path='/api/dj/voice') == 503
-with temp_site() as site, env(ELEVENLABS_API_KEY='test-key'):
-    for raw in [b'{"text":"   "}', b'{"text":null}', b'{"text":5}', b'{}']:
-        assert status_of(raw, path='/api/dj/voice') == 400, raw
-    with fake_http(b'<!doctype html><p>quota exceeded</p>'):
-        result, _ = request(b'{"text":"hi"}', path='/api/dj/voice')
-    assert result[0][0] == 502, result
-    assert not list(server.VOICES.glob('*.mp3')), 'an HTML error page must not be cached'
-    with fake_http(b'ID3\x03\x00fake-audio'):
-        result, _ = request(b'{"text":"hi"}', path='/api/dj/voice')
-    assert result[0][0] == 200 and (site / result[0][1]['file']).read_bytes().startswith(b'ID3'), result
-    with fake_http(OSError('should be served from the cache')):
-        assert status_of(b'{"text":"hi"}', path='/api/dj/voice') == 200
+# The retired voice route is gone; the Host check still comes first for every route.
+assert status_of(b'{"text":"hi"}', path='/api/dj/voice') == 404
+assert status_of(b'{}', path='/api/dj/nothing') == 404
+assert status_of(ok_body, host=f'evil.example:{PORT}', path='/api/dj/pick') == 403
+assert status_of(ok_body, origin='https://example.com', path='/api/dj/pick') == 403
+assert status_of(b'{"text":"hi"}', host=f'evil.example:{PORT}', path='/api/dj/voice') == 403
+assert not hasattr(server, 'dj_voice') and not hasattr(server, 'ask_gemini_for_picks')
 
 # Malformed YouTube input: a clean 400 before any download starts.
 saved_get_song = server.get_song
@@ -280,4 +204,4 @@ finally:
 
 # Valid shape still reaches the picker; replace only the external service boundary.
 assert status_of(ok_body) == 200
-print('PASS: origin/Host checks, Gemini and ElevenLabs failures, malformed input, the download cache and yt-dlp-missing errors all return clean responses')
+print('PASS: origin/Host checks, offline AI DJ picks, the removed voice route, malformed input, the download cache and yt-dlp-missing errors all return clean responses')

@@ -838,7 +838,6 @@ const djGame = createDjGame(queue, {
     phase = "playing";
     updateSetButtons();
     screens.results(results);
-    queue.say(`That's the set! ${Math.round(results.accuracy * 100)} percent, best combo ${results.best}. Make some noise!`);
   },
 });
 
