@@ -84,7 +84,8 @@ index_lock = threading.Lock()
 ALLOWED_HOSTS = {"youtube.com", "www.youtube.com", "m.youtube.com", "music.youtube.com", "youtu.be"}
 PORT = 8000  # python server.py 8001 for another port; set from the command line in __main__
 # Only this computer can reach the server (and spend the API keys' credits) unless you
-# opt in, e.g. AIRDECK_HOST=0.0.0.0 to open it to your Wi-Fi.
+# opt in with this machine's LAN IP, e.g. AIRDECK_HOST=192.168.1.20. The API only accepts
+# that name in the Host header, so with 0.0.0.0 other computers get pages but API calls 403.
 HOST = os.environ.get("AIRDECK_HOST", "").strip() or "127.0.0.1"
 AI_TIMEOUT = 15  # seconds before a Gemini or ElevenLabs request gives up (songs are short)
 # The yt-dlp command, or Python's module when pip's per-user install folder isn't on PATH.

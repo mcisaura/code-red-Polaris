@@ -4,7 +4,7 @@
 
 - Inspect Git status/diffs before editing this shared checkout; preserve unrelated work.
 - Use the user's current instructions to determine scope. Prefer focused changes and verify the result.
-- Current working branch is `merge-main`. Only publish to `main` when the user explicitly asks; preserve `virtual-effects` as fallback.
+- `main` is the published branch. Work on a feature branch and only push to `main` when the user explicitly asks.
 - Commit/push or create a PR when the user asks. Exclude the personal untracked `HANDOFF.md` from every commit.
 - Give short, plain progress updates and describe actual verification limits.
 
@@ -18,6 +18,7 @@
 - Comfortable hand ranges: blend palm Y .90→.55, effect palm Y .85→.40, volume distance .04→.42 of canvas width. Keep controls clear of the top lock zone (.32).
 - Bubble Aero includes particles escaping the polygon. Clear them when switching visual; keep emission bounded.
 - Do not restore the colorful startup test pattern. Synthetic preview is explicit (L or fake hands).
+- Text on the cream/glass panels needs at least 4.5:1 contrast. `--between` (#f5861f) is for bars and borders; orange text uses #8a4510.
 
 ## Files and verification
 
@@ -25,14 +26,16 @@
 - `audio.js`: DJ Deck audio engine; `aiDeck.js`: AirMix's engine copy.
 - `queue.js`: shared queue, playback requests, embedded/floating panels, announcements.
 - `transitions.js`: manual level blends and automatic tempo/echo transitions.
+- `mix-audio.js`: `analyzeTempo` (tempo and downbeat detection used by `transitions.js`); otherwise the archived two-deck engine.
 - `frame.js`: polygon WebGL visuals; `bubble-particles.js`: screen-space particles.
 - `djGame.js` / `djStart.js`: AirMix gameplay, set selection, onboarding and results.
 - `arcade-versus.html`: two-player Arcade games.
+- `landing.html` / `landing.js`: the homepage; `club.html` / `club.js`: the preserved 3D Club demo; `aero.css`: shared Aero styling.
 - `server.py`: local serving/downloads, Gemini picks, ElevenLabs speech; loads a gitignored `.env` at startup.
 - `FEATURES_PLAN.md` is historical, not the current product specification.
 
-Run relevant regression suites: `node tests/tracking.cjs`, `node tests/effects.cjs`, `node tests/queue-default.cjs`, `node tests/queue-selection.cjs`, `node tests/hand-blend.cjs`, `node tests/bubble-particles.cjs`, `node tests/queue-airmix.cjs`, `python3 tests/server-static.py`; run `git diff --check`. Browser checks matter for rendering and fullscreen. Stub tests do not replace real webcam/listening validation.
+Run the regression suites (all are fast): `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done`, then `python3 tests/server-static.py` and `python3 tests/server-requests.py`; run `git diff --check`. Changes to `analyzeTempo` must keep `tests/tempo-accuracy.cjs` (35 synthetic tempos, ±1 BPM) and `tests/tempo-silence.cjs` passing. Browser checks matter for rendering and fullscreen. Stub tests do not replace real webcam/listening validation.
 
 AirMix may select uncached library songs; they download on Play. Loading failures must show retry/new-set controls. The server must never serve dotfiles (including `.env` and `.git`) or directory listings.
 
-Run `python3 server.py 8001` after checking for an existing listener. Keys are server environment variables (`GEMINI_API_KEY`, `ELEVENLABS_API_KEY`); never reveal or commit secrets. Do not claim APIs are active just because integration exists. Check runtime configuration/logs.
+Run `python3 server.py 8001` after checking for an existing listener. Keys are server environment variables (`GEMINI_API_KEY`, `ELEVENLABS_API_KEY`); never reveal or commit secrets. The API only answers requests whose `Host` is localhost, 127.0.0.1 or `AIRDECK_HOST`; to use it from another computer, set `AIRDECK_HOST` to this machine's LAN IP (with 0.0.0.0 other computers get 403). Do not claim APIs are active just because integration exists. Check runtime configuration/logs.

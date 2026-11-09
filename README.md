@@ -87,8 +87,8 @@ ahead), and a DJ voice speaks up over the mix when the genre switches (and at th
 - **Echo out** when they're far apart (or a song's tempo can't be detected reliably): the current song echoes out and
   the next one fades in under the echoes.
 
-Tempo and downbeats are detected from the audio (`analyzeTempo` in `mix-audio.js`) and checked against the library's
-BPM. The browser console logs each mix.
+Tempo and downbeats are detected from the audio (`analyzeTempo` in `mix-audio.js`, within 0.1 BPM on the synthetic
+beats in `tests/tempo-accuracy.cjs`) and checked against the library's BPM. The browser console logs each mix.
 
 **Short mixes** (on by default, a checkbox under the DJ) bring each song in where it first gets going (skipping a
 quiet intro) and mix it out after about 20 s, in whole phrases, with shorter blends: a one-minute demo hears several
@@ -149,15 +149,23 @@ python3 server.py
 If Gemini can't be reached (no key, no internet, rate limit, overload), the DJ keeps going with the closest
 library songs by genre and tempo, and says so. The server prints whether Gemini is on. Without an ElevenLabs key the browser's built-in voice is used. Optional:
 `GEMINI_MODEL` (default `gemini-3.5-flash-lite`, 500 free requests a day) and `ELEVENLABS_VOICE_ID`.
-The server only answers this computer, so nobody on the venue Wi-Fi can spend your API credits (set
-`AIRDECK_HOST=0.0.0.0` to open it up), and only AirDeck's own pages may call its API.
+The server only answers this computer, so nobody on the venue Wi-Fi can spend your API credits, and only AirDeck's
+own pages may call its API. To use it from another computer, set `AIRDECK_HOST` to this machine's IP on the network
+(e.g. `AIRDECK_HOST=192.168.1.20`) and open `http://192.168.1.20:8000` there. With `AIRDECK_HOST=0.0.0.0` the pages
+load elsewhere but the API answers 403, because it only accepts its own names in the `Host` header.
 AirMix lives at `ai-dj.html`. DJ Deck (`index.html`) exposes AI DJ tools through **AI DJ & import** in its sidebar.
 
 ### Files
 
 - `index.html`: the hand tracker: hand tracking, gesture smoothing, hand → audio mapping, drawing, and the gesture
   modes (fist zones for effects and visuals; lock zone; easter eggs)
-- `audio.js`: its audio engine (load, play/pause, speed, filter, volume, waveform, effects)
+- `audio.js`: its audio engine (load, play/pause, speed, filter, volume, waveform, effects); `bitcrush-worklet.js`: the
+  bitcrush effect's audio worklet
+- `easter/`: the DJ Deck easter egg's GIF and sound
+- `landing.html`, `landing.js`: the homepage served at `/`
+- `arcade-versus.html`: Arcade · 2P
+- `aero.css`: the shared Aero styling
+- `mix.html`: redirects to `index.html` (the old two-deck page, see below)
 - `frame.js`: WebGL visual inside the shape between both hands' thumb and index tips
 - `bubble-particles.js`: bubbles emitted from the portal, floating outside its edges
 - `club.html`, `club.js`: the preserved 3D Club demo from `disco-ui`, with a reactive dance floor, lights and camera LED wall. It is separate from the current Aero DJ Deck; its Club view toggle hides the demo camera panel while tracking continues.
@@ -165,11 +173,14 @@ AirMix lives at `ai-dj.html`. DJ Deck (`index.html`) exposes AI DJ tools through
   `index.html` or `audio.js` can't break it
 - `queue.js`: song queue and its panel (add from YouTube or files, reorder, remove, play, next, AI DJ, AirMix sets)
 - `transitions.js`: the AI DJ's mixes between songs (beat-matched blends, echo-outs)
+- `mix-audio.js`: `analyzeTempo`, the tempo and downbeat detection the mixes use (the rest is the archived two-deck engine)
 - `djGame.js`: AirMix's game: the chart, hits and their sounds, the playable mixes, the set's end, the Your set card
 - `djStart.js`: AirMix's screens: pick your set, how to play, camera and hand check, loading, 3-2-1, results
 - `server.py`: local server; serves the site, downloads YouTube audio via yt-dlp into `downloads/`, and runs the AI DJ (Gemini picks, ElevenLabs voice)
 - `library.json`, `prefetch.py`: the song library and a script that fills `music/` with it
-- `tests/tracking.cjs`: `node tests/tracking.cjs` runs the hand tracking / gesture mode tests
+- `tests/`: regression tests, no browser or camera needed. Run them all with
+  `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done` and `python3 tests/server-static.py`,
+  `python3 tests/server-requests.py`
 - `FEATURES_PLAN.md`: historical implementation plan
 - `AGENTS.md`: current guidance for coding agents
 
