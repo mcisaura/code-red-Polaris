@@ -1012,7 +1012,7 @@ const fingerCount = (h) => h.ext.filter(Boolean).length;
 
 function enterMode(m, forced = false) {
   modes.current = m;
-  modes.keyForced = forced;
+  modes.keyForced = forced && m !== "normal";
   modes.count = 0; modes.pick = 0; modes.pending = 0; modes.hold = 0; modes.lostSince = null; modes.dropSince = null; modes.zeroSince = null;
 }
 
@@ -1137,6 +1137,7 @@ function pick(n) {
 // Keyboard test keys (also a backup if tracking struggles during a demo)
 window.addEventListener("keydown", (e) => {
   if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.repeat) return;
+  if (!e.key) return;
   const k = e.key.toLowerCase();
   if (k === "d") trackingDebug.enabled = !trackingDebug.enabled;
   else if (k === "s") enterMode(modes.current === "song" ? "normal" : "song", true);
@@ -1621,7 +1622,7 @@ function updateLock(inZone, now) {
   }
 }
 window.addEventListener("keydown", (e) => {   // test key
-  if (e.key.toLowerCase() === "k" && e.target.tagName !== "INPUT" && !e.metaKey && !e.ctrlKey && !e.repeat) { lock.locked = !lock.locked; flash(lock.locked ? "Controls locked" : "Controls unlocked"); }
+  if (e.key?.toLowerCase() === "k" && e.target.tagName !== "INPUT" && !e.metaKey && !e.ctrlKey && !e.repeat) { lock.locked = !lock.locked; flash(lock.locked ? "Controls locked" : "Controls unlocked"); }
 });
 
 function drawLock(now) {

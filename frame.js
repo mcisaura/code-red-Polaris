@@ -270,9 +270,10 @@ export class FrameFx {
 
   // Match the 2D canvas pixel size.
   resize(w, h) {
-    if (!this.ok) return;
+    // Remember the size even while the context is lost, so a restore comes back at this size
     this.w = w;
     this.h = h;
+    if (!this.ok) return;
     this.canvas.width = w;
     this.canvas.height = h;
     this.gl.viewport(0, 0, w, h);
