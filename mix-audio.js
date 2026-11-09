@@ -218,8 +218,9 @@ function tone(ctx, dest, t, freq, dur, { type = "sawtooth", cutoff = 1200, vel =
 // ---- Tempo detection ------------------------------------------------------------------
 // 1. Onset envelope: frame energy (512-sample hops) → log → rising edges only,
 //    minus a local average so steady loudness doesn't count.
-// 2. Autocorrelation over 70–180 BPM, weighted toward ~120 BPM, gives a rough tempo.
-// 3. Fine search (±1.5 BPM in 0.01 steps): fold the onset envelope onto a pulse train
+// 2. Autocorrelation over 70–180 BPM (fractional lags, plus the 2-beat lag; a doubled tempo wins if clearly stronger),
+//    weighted toward ~120 BPM, gives a rough tempo (good to ~1 BPM).
+// 3. Fine search (±2 BPM in 0.02 steps, then 0.002): fold the onset envelope onto a pulse train
 //    at each candidate tempo and phase, keep the best. Accuracy matters: 0.1 BPM of
 //    error drifts a whole beat in about 10 minutes.
 // 4. Of the four beat phases, the one with the strongest onsets is taken as the downbeat.
@@ -250,33 +251,66 @@ export function analyzeTempo(buffer) {
     if (c >= 0) onset[c] = Math.max(0, flux[c] - run / (2 * avgWin));
   }
 
-  // 2. Coarse tempo
-  let best = 0, bestLag = 0;
-  for (let lag = Math.floor((fps * 60) / 180); lag <= Math.ceil((fps * 60) / 70); lag++) {
-    let s = 0;
-    for (let i = 0; i + lag < frames; i++) s += onset[i] * onset[i + lag];
-    const bpm = (fps * 60) / lag;
-    const w = Math.exp(-0.5 * (Math.log2(bpm / 120) / 0.6) ** 2);
-    if (s * w > best) { best = s * w; bestLag = lag; }
-  }
-  // No lag repeats any onset (silence, a single hit): there is no tempo to find.
-  if (!(bestLag > 0)) return { bpm: 120, first: 0 };
-  const rough = (fps * 60) / bestLag;
-  if (!Number.isFinite(rough) || rough <= 0) return { bpm: 120, first: 0 };
-
-  // 3. Fine tempo + phase
+  // 2. Coarse tempo. Onset autocorrelation at fractional lags (0.1 BPM apart), summed with
+  //    its multiples (1, 2 and 4 beats) so the real beat beats a sub-beat or 1.5-beat
+  //    period that only matches some of the hits. Whole-frame lags were up to ~3 BPM
+  //    apart at 150+ BPM, wider than the fine search window, which then clipped.
   const at = (x) => { const i = x | 0, f = x - i; return i + 1 < frames ? onset[i] + (onset[i + 1] - onset[i]) * f : 0; };
-  let fine = { score: -1, bpm: rough, phase: 0 };
-  const fineSteps = 300; // 0.01 BPM apart across rough ± 1.5 BPM; a fixed count always ends
-  for (let k = 0; k <= fineSteps; k += 1) {
-    const bpm = rough - 1.5 + k * 0.01;
-    const period = (fps * 60) / bpm;
-    for (let ph = 0; ph < period; ph += 1) {
-      let s = 0;
-      for (let x = ph; x < frames; x += period) s += at(x);
-      if (s > fine.score) fine = { score: s, bpm, phase: ph };
+  const corr = (lag) => {
+    let s = 0, n = 0;
+    for (let i = 0; i + lag < frames - 1; i++) { s += onset[i] * at(i + lag); n++; }
+    return n > 16 ? s / n : 0;
+  };
+  let best = 0, rough = 0;
+  for (let bpm = 70; bpm <= 180; bpm += 0.1) {
+    const lag = (fps * 60) / bpm;
+    const w = Math.exp(-0.5 * (Math.log2(bpm / 120) / 0.6) ** 2);
+    const s = (corr(lag) + 0.5 * corr(2 * lag)) * w;
+    if (s > best) { best = s; rough = bpm; }
+  }
+  // The tempo prior is for choosing between peaks; across one peak its slope would drag the
+  // estimate toward 120 (about 1 BPM at 124), so re-center on the unweighted peak.
+  if (best > 0) {
+    let top = -1, center = rough;
+    for (let bpm = rough - 1.5; bpm <= rough + 1.5; bpm += 0.1) {
+      const lag = (fps * 60) / bpm, s = corr(lag) + 0.5 * corr(2 * lag);
+      if (s > top) { top = s; center = bpm; }
+    }
+    rough = center;
+    // Octave check: a fast tempo (drum & bass) scores like its half, since every other beat
+    // repeats just as well. Prefer the double only when its own one-beat lag is clearly stronger (1.25x)
+    // as the half's; a real slow song has nothing at the half-beat lag, so it stays put.
+    if (rough * 2 <= 180) {
+      let dbl = -1, dblBpm = rough * 2;
+      for (let bpm = rough * 2 - 2; bpm <= rough * 2 + 2; bpm += 0.1) {
+        const c = corr((fps * 60) / bpm);
+        if (c > dbl) { dbl = c; dblBpm = bpm; }
+      }
+      if (dbl >= 1.25 * corr((fps * 60) / rough)) rough = dblBpm;
     }
   }
+  // No lag repeats any onset (silence, a single hit): there is no tempo to find.
+  if (!(best > 0) || !Number.isFinite(rough) || rough <= 0) return { bpm: 120, first: 0 };
+
+  // 3. Fine tempo + phase. Onsets sit on whole frames, so the autocorrelation above is only
+  //    good to about a BPM (its peak snaps toward whole-frame lags); this pass folds the whole
+  //    envelope onto a pulse train at each candidate, which is sharp, over a window wide
+  //    enough to hold the true tempo. Coarse pass (±2 BPM, 0.02 steps), then ±0.02 at 0.002.
+  let fine = { score: -1, bpm: rough, phase: 0 };
+  const search = (center, half, step) => {
+    const steps = Math.round((2 * half) / step); // a fixed count always ends
+    for (let k = 0; k <= steps; k += 1) {
+      const bpm = center - half + k * step;
+      const period = (fps * 60) / bpm;
+      for (let ph = 0; ph < period; ph += 0.25) {
+        let s = 0;
+        for (let x = ph; x < frames; x += period) s += at(x);
+        if (s > fine.score) fine = { score: s, bpm, phase: ph };
+      }
+    }
+  };
+  search(rough, 2, 0.02);
+  search(fine.bpm, 0.02, 0.002);
   let bpm = fine.bpm;
   const period = (fps * 60) / bpm;
 

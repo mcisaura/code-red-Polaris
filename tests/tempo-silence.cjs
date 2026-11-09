@@ -48,9 +48,8 @@ for (const [name, buffer] of [['silence', silent], ['single hit', oneHit]]) {
   });
 }
 
-// 2. A steady beat still detects its tempo within about 1 BPM. Only some tempos meet that
-// bar today: the coarse search uses whole frame lags, so 90, 100, 120, 128 and others are
-// off by 2-10 BPM (already true before this fix); 105 and 115 are the checked cases here.
+// 2. A steady beat still detects its tempo within about 1 BPM (tests/tempo-accuracy.cjs covers
+// the wider range of tempos and patterns).
 for (const bpm of [105, 115]) {
   check(`${bpm} BPM pulse train detected within 1 BPM`, () => {
     const r = analyze(beats(bpm, 20));
