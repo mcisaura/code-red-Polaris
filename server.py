@@ -306,6 +306,13 @@ def tempo_gap(a, b):
     return min(abs(a - b), abs(a - 2 * b), abs(2 * a - b))
 
 
+# Vibe words that set the opener's energy when no genre, artist or title matches the vibe.
+CALM_WORDS = ("chill", "slow", "relax", "calm", "mellow", "soft", "smooth", "lofi", "lo fi", "easy", "sad")
+ENERGY_WORDS = ("hype", "party", "energy", "fast", "banger", "turn up", "lit", "dance", "club", "workout", "gym", "hard")
+# Vibe words that name a library genre by another name.
+GENRE_ALIASES = {"rap": "hip-hop", "rnb": "r&b"}
+
+
 def dj_pick(request):
     """Pick the next songs from the request's "library" ([{id, artist, title, bpm, genre}]).
     Returns a list of {id, artist, title, reason, intro}.
@@ -352,13 +359,30 @@ def dj_pick(request):
         ))
 
     def opener(choices):
-        """The first song of a set: one matching the vibe's words, else the first in the library."""
-        words = [w for w in re.findall(r"[a-z0-9&]+", clean(request.get("vibe") or "", 200).lower()) if len(w) >= 3]
+        """The first song of a set and why. A vibe word matching a song's genre, artist or title wins;
+        else a calm word opens with the slowest song and an energy word with the fastest; else the first
+        song in the library. Tempo is the raw BPM: folding half and double time would make a 155 BPM trap
+        (felt at about 78) count as slower than an 80 BPM ballad, the opposite of how they sound."""
+        vibe = clean(request.get("vibe") or "", 200).lower()
+        tokens = re.findall(r"[a-z0-9&]+", vibe)
+        words = [GENRE_ALIASES.get(w, w) for w in tokens if len(w) >= 3]
+        # Mood words only count as whole words here ("dance" matches "edm / dance", but "hard"
+        # mustn't match "Richard" or "sad" match "Sade"); other words match any part of a name.
+        mood = set(CALM_WORDS + ENERGY_WORDS)
+        hits = lambda word, text: re.search(rf"\b{re.escape(word)}\b", text) if word in mood else word in text
         for song in choices:
             text = f"{genre(song)} {label(song)}"
-            if any(word in text for word in words):
-                return song, True
-        return choices[0], False
+            if any(hits(word, text) for word in words):
+                return song, "matches your vibe"
+        # The earliest calm or energy word sets the mood, so "chill into hype" opens calm.
+        phrase = f" {' '.join(tokens)} "
+        found = [(phrase.index(f" {w} "), w) for w in CALM_WORDS + ENERGY_WORDS if f" {w} " in phrase]
+        rated = [s for s in choices if bpm(s)]
+        if found and rated:
+            if min(found)[1] in CALM_WORDS:
+                return min(rated, key=bpm), "calm opener"
+            return max(rated, key=bpm), "high-energy opener"
+        return choices[0], "starts the set"
 
     picks = []
     while len(picks) < count:
@@ -366,14 +390,13 @@ def dj_pick(request):
         if not choices:
             break
         before = library.get(picks[-1]["id"]) if picks else playing
-        matched = False
         if before:
             song = closest(before, choices)
         else:
-            song, matched = opener(choices)
+            song, opening = opener(choices)
         artist, title = clean(song.get("artist", ""), 80), clean(song.get("title", ""), 120)
         if not before:
-            reason = "matches your vibe" if matched else "starts the set"
+            reason = opening
             intro = f"Let's get it started with {title} by {artist}."
         elif genre(song) == genre(before):
             reason = "same genre, close tempo" if tempo_gap(bpm(before), bpm(song)) <= 8 else "same genre"

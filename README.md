@@ -79,7 +79,7 @@ YouTube downloads can take 10–30 seconds, with a progress bar.
 
 In the Queue panel, type a vibe (e.g. "chill into hype") and press **Start**. The server picks songs from the library
 that flow from what's playing, offline: the same genre first, then the closest tempo, with no repeats until every song
-has played (a word of your vibe, like "hip-hop", chooses the opening song). With the DJ on, it mixes into the next song
+has played (a word of your vibe, like "hip-hop", chooses the opening song; with no genre, artist or title match, a calm word such as "chill" or "sad" opens with the slowest song, and an energy word such as "hype" or "party" opens with the fastest, using raw BPM). With the DJ on, it mixes into the next song
 before the current one's ending fades out (it keeps two queued ahead), and your browser's built-in voice speaks up over
 the mix when the genre switches (and at the start of the set):
 

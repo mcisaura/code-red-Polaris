@@ -130,6 +130,31 @@ with env(GEMINI_API_KEY=None, ELEVENLABS_API_KEY=None):
     # The vibe picks the opening song when nothing is playing.
     status, body = pick({'library': LIBRARY, 'count': 1, 'vibe': 'some hip-hop'})
     assert status == 200 and body['picks'][0]['id'] == 'hhh111HHH11', body
+    # Energy words open with the tempo extremes of the library (LIBRARY: 90, 120, 122 BPM).
+    def opener(vibe, **extra):
+        status, body = pick({'library': LIBRARY, 'count': 1, 'vibe': vibe, **extra})
+        assert status == 200, (status, body)
+        return body['picks'][0]
+    calm = opener('chill')
+    assert calm['id'] == 'hhh111HHH11' and calm['reason'] == 'calm opener', calm  # lowest BPM
+    fast = opener('hype')
+    assert fast['id'] == 'xyz987QRS65' and fast['reason'] == 'high-energy opener', fast  # highest BPM
+    assert opener('turn up')['id'] == 'xyz987QRS65' and opener('lo-fi')['id'] == 'hhh111HHH11'
+    assert opener('chill into hype')['id'] == 'hhh111HHH11'  # the earliest mood word sets the opener
+    # Mood words match names only as whole words: "hard" isn't "Richard", so it's still an energy word.
+    richard = [dict(LIBRARY[0], artist='Richard'), *LIBRARY[1:]]
+    hard = pick({'library': richard, 'count': 1, 'vibe': 'hard'})[1]['picks'][0]
+    assert hard['id'] == 'xyz987QRS65' and hard['reason'] == 'high-energy opener', hard
+    # A genre, artist or title match still wins over an energy word.
+    won = opener('party hip-hop')
+    assert won['id'] == 'hhh111HHH11' and won['reason'] == 'matches your vibe', won
+    assert opener('rap')['id'] == 'hhh111HHH11'  # "rap" is an alias for hip-hop
+    # An empty vibe opens with the first song in the library.
+    first = opener('')
+    assert first['id'] == 'abc123DEF45' and first['reason'] == 'starts the set', first
+    # Energy openers skip songs already played or queued.
+    assert opener('chill', played=['C - V'])['id'] == 'abc123DEF45'
+    assert opener('hype', queued=['B - U'])['id'] == 'abc123DEF45'
     # Every song played: repeats are allowed, the one played longest ago first.
     status, body = pick({'library': LIBRARY, 'count': 1, 'played': ['A - T', 'B - U', 'C - V'], 'queued': []})
     assert status == 200 and body['picks'][0]['id'] == 'abc123DEF45', body
