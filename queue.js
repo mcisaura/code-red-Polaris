@@ -41,6 +41,18 @@ async function retryOnNetworkError(request) {
   }
 }
 
+// Reordering math, shared by the panel's pointer drag and its keyboard moves (tested on its own).
+// dropIndexAt: the insertion point 0..mids.length for a pointer at y, given each row's vertical middle.
+export function dropIndexAt(mids, y) {
+  const index = mids.findIndex((mid) => y < mid);
+  return index === -1 ? mids.length : index;
+}
+// The position queue.move wants when the row at `from` is dropped at insertion point `drop`:
+// taking the row out first shifts everything after it up by one.
+export function moveTarget(from, drop) {
+  return drop > from ? drop - 1 : drop;
+}
+
 export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json" } = {}) {
   // Items: { id, title, detail, url } for YouTube, { id, title, detail, file } for files.
   // DJ picks also carry dj: { intro, reason }, and browserVoice: false for AirMix sets (which stay quiet).
@@ -90,15 +102,30 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
   // Downloads a YouTube link or search through server.py, showing it in `downloads`
   // with live progress while it runs. Resolves with { file, title }.
-  async function downloadYouTube(text, { title = text, detail = "YouTube", fromDj = false } = {}) {
+  // cancellable: an AirMix set's download. cancelSet() stops its polling and drops its result
+  // (the server may still finish the download, which only warms the cache).
+  const setDownloadCancels = new Set(); // cancel hooks of the set's pending downloads
+  const cancelError = () => Object.assign(new Error("cancelled"), { cancelled: true });
+  async function downloadYouTube(text, { title = text, detail = "YouTube", fromDj = false, cancellable = false } = {}) {
     const job = Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
     const entry = { key: job, title, detail, fromDj, stage: "searching", percent: null, error: null };
     downloads = [...downloads, entry];
     changed();
+    let cancelled = false;
+    let abort;
+    const aborted = new Promise((resolve) => (abort = resolve));
+    const hook = () => {
+      if (cancelled) return;
+      cancelled = true;
+      clearInterval(poll);
+      removeEntry();
+      abort();
+    };
+    if (cancellable) setDownloadCancels.add(hook);
     const poll = setInterval(async () => {
       try {
         const state = await (await fetch(`${apiBase}/progress?job=${job}`)).json();
-        if (state.stage !== "unknown" && entry.stage !== "failed") {
+        if (!cancelled && state.stage !== "unknown" && entry.stage !== "failed") {
           Object.assign(entry, state);
           changed();
         }
@@ -111,11 +138,18 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       changed();
     };
     try {
-      const result = await postJson("/youtube", { url: text, job });
+      const result = await Promise.race([
+        postJson("/youtube", { url: text, job }),
+        aborted.then(() => { throw cancelError(); }),
+      ]);
+      if (cancelled) throw cancelError();
       clearInterval(poll);
       removeEntry();
+      setDownloadCancels.delete(hook);
       return result;
     } catch (error) {
+      setDownloadCancels.delete(hook);
+      if (cancelled) throw cancelError();
       clearInterval(poll);
       Object.assign(entry, { stage: "failed", error: error.message });
       changed();
@@ -185,6 +219,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   const decoded = new Map(); // item id -> Promise<AudioBuffer>
   const ready = new Map(); // item id -> AudioBuffer, once decoded
   let fallbackDecoder = null;
+  let setToken = 0; // bumped whenever an AirMix set starts or is cancelled; its songs carry the one they belong to
+  let setPending = false; // a set is prepared but not started (beginSet) yet
   let loadingId = null; // the song being loaded right now, kept even if it moves out of the window
   let hoveredId = null;
 
@@ -202,7 +238,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
           await Promise.resolve();
           const song = library.find((song) => song.id === item.libraryId);
           if (!song) throw new Error("Default song is no longer in the library");
-          item.url = (await libraryEntry(song, "Default library")).url;
+          const url = (await libraryEntry(song, "Default library", { cancellable: item.inSet })).url;
+          if (item.inSet && item.setToken !== setToken) throw cancelError();
+          item.url = url;
         }
         if (item.url) {
           const response = await fetch(item.url);
@@ -215,12 +253,14 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         fallbackDecoder ??= new OfflineAudioContext(2, 1, 48000);
         const buffer = await (deck.ctx ?? fallbackDecoder).decodeAudioData(data);
         transitions.prepare(buffer);
+        if (item.inSet && item.setToken !== setToken) throw cancelError();
         if (decoded.get(item.id) === promise) ready.set(item.id, buffer);
         return buffer;
       });
-      promise.catch(() => {
+      promise.catch((error) => {
         // A superseded decode failing late must not delete the newer one or mark the song failed.
         if (decoded.get(item.id) !== promise) return;
+        if (error?.cancelled) return void decoded.delete(item.id); // a left set: not a failure
         decoded.delete(item.id);
         loadFailed.add(item.id);
       });
@@ -323,15 +363,21 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
   // A queue item for a library song: straight from music/, or downloaded first
   // if it isn't there yet (run prefetch.py so that never happens on stage).
-  async function libraryEntry(song, detail) {
+  async function libraryEntry(song, detail, { cancellable = false } = {}) {
     const title = `${song.artist} - ${song.title}`;
     const facts = { libraryId: song.id, bpm: song.bpm, genre: song.genre };
     if (song.available !== false) return { title, detail, url: song.file, ...facts };
     const download = await downloadYouTube(`https://www.youtube.com/watch?v=${song.id}`, {
       title,
       detail: "Not in music/ yet (run prefetch.py), downloading",
+      cancellable,
     });
     return { title, detail, url: download.file, ...facts };
+  }
+
+  function abortSetDownloads() {
+    [...setDownloadCancels].forEach((hook) => hook());
+    setDownloadCancels.clear();
   }
 
   // ---- AI DJ ----------------------------------------------------------------------
@@ -767,12 +813,20 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Resolves once the DJ's first song is picked and decoded, so it can start instantly
     // (rejects if it couldn't be loaded, say its download failed).
     async readyToStart() {
-      while (!items.length) await new Promise((resolve) => setTimeout(resolve, 200));
+      // A cancelled set (dj off, or a newer set) must not leave this waiting for songs that never come.
+      const token = setToken;
+      const gone = () => token !== setToken || !dj.on;
+      while (!items.length) {
+        if (gone()) throw cancelError();
+        await new Promise((resolve) => setTimeout(resolve, 200));
+      }
+      if (gone()) throw cancelError();
       await decode(items[0]);
     },
 
     // Starts the set the DJ prepared with startDj(vibe, { wait: true }).
     beginSet() {
+      setPending = false;
       dj.waitToStart = false;
       deck.ensureContext();
       if (currentId === null && !transitioning && items.length) transitionTo(items[0]);
@@ -788,6 +842,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       cancelEnding();
       cancelTransition();
       const request = ++playRequest; // invalidate old loads before waiting for the library
+      const token = ++setToken; // ...and the old set's downloads
+      abortSetDownloads();
+      setPending = true;
       await queue.libraryReady();
       if (request !== playRequest) return;
       transitions.cancel();
@@ -807,6 +864,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
             bpm: song.bpm,
             genre: song.genre,
             defaultLibrary: true, // decode() downloads it if it isn't in music/
+            inSet: true,
+            setToken: token,
             url: song.available ? song.file : null,
             dj: { intro: setLine(song, songs[index - 1]), reason: null, browserVoice: false },
           },
@@ -814,6 +873,31 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         );
       });
       prefetch();
+    },
+
+    // Leaving a set before it starts (New set): its pending downloads stop polling and their
+    // results are ignored, nothing gets marked failed or reported, and the set can't begin.
+    // The server may finish the downloads (that warms the cache). Does nothing once it has begun.
+    cancelSet() {
+      if (!setPending) return false;
+      setPending = false;
+      setToken += 1;
+      playRequest += 1;
+      abortSetDownloads();
+      cancelTransition();
+      deck.stopSource();
+      Object.assign(dj, { on: false, set: false, busy: false, waitToStart: false, status: null });
+      dj.generation += 1;
+      items = [];
+      currentId = null;
+      requestedId = null;
+      loadingId = null;
+      decoded.clear();
+      ready.clear();
+      loadFailed.clear();
+      status = null;
+      changed();
+      return true;
     },
 
     // Ends a set: the last song fades out, muffling as it goes, then stops (the queue
@@ -1071,20 +1155,26 @@ const styles = `
 }
 .queuePanel-downloads:empty { display: none; }
 .queuePanel-row {
-  position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 10px; cursor: grab;
+  position: relative; display: flex; align-items: center; gap: 8px; padding: 8px; border-radius: 10px; cursor: grab; user-select: none; -webkit-user-select: none;
   background: var(--bg); border: 1px solid var(--border);
 }
 .queuePanel-row.fromDj::before {
   content: ""; position: absolute; left: 0; top: 8px; bottom: 8px; width: 3px; border-radius: 3px; background: var(--between);
 }
 .queuePanel-row.current { border-color: var(--between); }
-.queuePanel-row.dragging { opacity: 0.35; }
+.queuePanel-row.dragging { opacity: 0.55; }
+.queuePanel-row:focus-visible { outline: 2px solid var(--between); outline-offset: 1px; }
 .queuePanel-row.dropBefore { box-shadow: inset 0 3px 0 var(--between); }
 .queuePanel-row.dropAfter { box-shadow: inset 0 -3px 0 var(--between); }
 .queuePanel-row.download { cursor: default; flex-wrap: wrap; border-style: dashed; }
 .queuePanel-row.download.failed { border-color: #ff7b7b; }
 .queuePanel-row.download .queuePanel-bar { flex-basis: 100%; }
-.queuePanel-handle { color: var(--muted); letter-spacing: -2px; user-select: none; }
+.queuePanel-handle {
+  color: var(--muted); letter-spacing: -2px; user-select: none; cursor: grab;
+  touch-action: none; /* a drag from the handle reorders; the rest of the row still scrolls the list */
+  display: flex; align-items: center; justify-content: center; min-width: 28px; align-self: stretch; margin: -8px 0 -8px -4px;
+}
+.queuePanel-row.librarySong { cursor: default; }
 .queuePanel-number { width: 18px; text-align: right; font-size: 12px; color: var(--muted); font-variant-numeric: tabular-nums; }
 .queuePanel-track { flex: 1; min-width: 0; display: flex; flex-direction: column; gap: 2px; }
 .queuePanel-track strong { font-size: 13px; overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
@@ -1406,9 +1496,6 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     queue.addFile(fileInput.files[0]);
     fileInput.value = "";
   });
-  list.addEventListener("dragleave", (event) => {
-    if (!list.contains(event.relatedTarget)) setDropIndex(null);
-  });
   list.addEventListener("pointerleave", () => {
     clearTimeout(hoverTimer);
     queue.hover(null);
@@ -1503,6 +1590,15 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     });
   }
 
+  // Shows where the dragged row would land for the pointer's height.
+  function updateDrag(event) {
+    const mids = [...list.children].map((child) => {
+      const rect = child.getBoundingClientRect();
+      return rect.top + rect.height / 2;
+    });
+    setDropIndex(dropIndexAt(mids, event.clientY));
+  }
+
   function drop(items) {
     const movedId = draggedId;
     const target = dropIndex;
@@ -1512,15 +1608,16 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     if (movedId === null || target === null) return;
     const from = items.findIndex((item) => item.id === movedId);
     // Taking the row out first shifts everything after it up by one.
-    queue.move(movedId, target > from ? target - 1 : target);
+    queue.move(movedId, moveTarget(from, target));
   }
 
   function row(item, index, state) {
     const isCurrent = item.id === state.currentId;
     const isLoading = item.id === state.loadingId;
     const classes = ["queuePanel-row", isCurrent && "current", item.dj && "fromDj"].filter(Boolean).join(" ");
-    const entry = element("li", { className: classes, draggable: "true" }, [
-      element("span", { className: "queuePanel-handle", "aria-hidden": "true", text: "⋮⋮" }),
+    const handle = element("span", { className: "queuePanel-handle", title: "Drag to reorder", "aria-hidden": "true", text: "⋮⋮" });
+    const entry = element("li", { className: classes, tabindex: "0", "data-id": String(item.id), "aria-keyshortcuts": "Alt+ArrowUp Alt+ArrowDown" }, [
+      handle,
       element("span", { className: "queuePanel-number", text: String(index + 1) }),
       element("div", { className: "queuePanel-track" }, [
         element("strong", { text: item.title }),
@@ -1553,30 +1650,49 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
       clearTimeout(hoverTimer);
       hoverTimer = setTimeout(() => queue.hover(item.id), hoverDecodeMs);
     });
-    entry.addEventListener("dragstart", (event) => {
+    // Reordering with pointer events, so touch works: drag the ⋮⋮ handle (it doesn't scroll the
+    // list), or, with a mouse, anywhere on the row except its buttons. Alt+↑/↓ on a focused row
+    // moves it too.
+    let press = null; // { id, x, y } until the drag starts (mouse rows wait for a few pixels of movement)
+    const startDrag = (event) => {
       draggedId = item.id;
       entry.classList.add("dragging");
-      event.dataTransfer.effectAllowed = "move";
-      event.dataTransfer.setData("text/plain", String(item.id));
-    });
-    entry.addEventListener("dragover", (event) => {
-      event.preventDefault();
-      const rect = entry.getBoundingClientRect();
-      setDropIndex(event.clientY < rect.top + rect.height / 2 ? index : index + 1);
-    });
-    entry.addEventListener("drop", (event) => {
-      event.preventDefault();
-      drop(state.items);
-    });
-    entry.addEventListener("dragend", () => {
+      try { entry.setPointerCapture(event.pointerId); } catch { /* the synthetic or ended pointer */ }
+      updateDrag(event);
+    };
+    const endDrag = (commit) => {
+      press = null;
       entry.classList.remove("dragging");
-      // Dropped outside the list (or cancelled): redraw anything that changed meanwhile.
-      if (draggedId !== null) {
+      if (draggedId === null) return;
+      if (commit) {
+        drop(state.items);
+      } else {
         draggedId = null;
         setDropIndex(null);
-        rowsKey = "";
+        rowsKey = ""; // redraw anything that changed meanwhile
         render();
       }
+    };
+    entry.addEventListener("pointerdown", (event) => {
+      if (event.button !== 0 || event.target.closest("button")) return;
+      const onHandle = event.target.closest(".queuePanel-handle");
+      if (!onHandle && event.pointerType !== "mouse") return;
+      press = { x: event.clientX, y: event.clientY };
+      if (onHandle) startDrag(event);
+    });
+    entry.addEventListener("pointermove", (event) => {
+      if (draggedId === item.id) return void updateDrag(event);
+      if (press && Math.hypot(event.clientX - press.x, event.clientY - press.y) > 4) startDrag(event);
+    });
+    entry.addEventListener("pointerup", () => endDrag(true));
+    entry.addEventListener("pointercancel", () => endDrag(false));
+    entry.addEventListener("keydown", (event) => {
+      if (!event.altKey || event.target !== entry || (event.key !== "ArrowUp" && event.key !== "ArrowDown")) return;
+      event.preventDefault();
+      const position = state.items.findIndex((candidate) => candidate.id === item.id) + (event.key === "ArrowUp" ? -1 : 1);
+      if (position < 0 || position >= state.items.length) return;
+      queue.move(item.id, position);
+      list.querySelector(`[data-id="${item.id}"]`)?.focus(); // the rows were rebuilt
     });
     return entry;
   }

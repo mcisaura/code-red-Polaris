@@ -8,6 +8,7 @@
 //     startCamera: async () => true,          // false if the camera didn't start
 //     handSeen: (side) => bool,               // "left" / "right" in view right now
 //     prepare: async (ids) => {},             // load that set (called on Play, so it loads meanwhile)
+//     cancel: () => {},                       // the set being prepared was dropped (New set): stop loading it
 //     loadingText: () => "Downloading …",     // what's loading right now, for the loading screen (optional)
 //     begin: () => {},                        // start the set, on "Go"
 //   });
@@ -86,7 +87,7 @@ function saveSet(ids) {
   }
 }
 
-export function createStartScreen(stage, { library, startCamera, handSeen, prepare, begin, loadingText = () => null }) {
+export function createStartScreen(stage, { library, startCamera, handSeen, prepare, begin, loadingText = () => null, cancel = () => {} }) {
   addStyles();
   let root = null;
   let cameraReady = false; // the camera's on and the hands have been checked once
@@ -107,6 +108,7 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
   // ---- pick your set
   async function setSelect() {
     const mine = ++run;
+    cancel(); // a set that was still loading stops (downloads, and starting)
     show(`<div class="djStart-panel"><p class="djStart-status">Loading the songs…</p></div>`);
     let songs;
     try {

@@ -53,7 +53,8 @@ The AI DJ works offline, with no API keys. If you see 404s or the wrong page, an
 
 Open http://localhost:8000 in Chrome and choose **DJ Deck**. Click **Start camera**; **Show controls & help** contains calibration and advanced controls. Pick
 songs from the **Library** (▶ plays one now, + adds it, **Add all** queues them all), or let the AI DJ choose. Drag
-songs to reorder them. The player bar (in the Song card and the queue) shows the song's progress (click or drag it to
+a song's ⋮⋮ handle to reorder it (works with touch; a mouse can drag anywhere on the row), or press Alt+↑/↓ on a
+focused row. The player bar (in the Song card and the queue) shows the song's progress (click or drag it to
 jump), with ⏮ (restart, or previous song near the start), ⏯ and ⏭. Songs around the current one are decoded ahead,
 so skipping back and forth is instant.
 
@@ -103,7 +104,7 @@ osu!: you play a DJ set with your hands. It opens on **Pick your set**: tick 2�
 order you want them (each pair shows whether it'll be a blend or a cut, and the last set is remembered). Songs that
 aren't on this computer yet (not in `music/`, say on a fresh clone) are marked **↓ download**: each downloads from
 YouTube when it's needed (the first while you get ready, each next one while the one before plays; the game holds the
-mix until it's ready). If the first can't load, you get **Try again** or **New set**; a later one that fails drops out
+mix until it's ready). If the first can't load, you get **Try again** or **New set** (New set while it's loading also stops its downloads); a later one that fails drops out
 of the set. Run `python prefetch.py` before a demo to have every song ready locally. Then, the
 first time, how to play in three pictures, the camera and a check that it sees both hands; the set loads while
 you do that, then 3, 2, 1.

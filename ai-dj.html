@@ -339,7 +339,14 @@ async function startCamera() {
     video.srcObject = stream;
     // Unplugged, or permission revoked: the game runs on camera frames, so say so.
     for (const track of stream.getVideoTracks()) track.addEventListener("ended", () => cameraStopped());
-    await video.play();
+    try {
+      await video.play();
+    } catch (playError) {
+      // Don't leave the camera on (and the browser's indicator lit) when playback fails.
+      stream.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+      throw playError;
+    }
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     $("placeholder")?.remove();
@@ -848,6 +855,7 @@ const djGame = createDjGame(queue, {
 
 // The screens: pick your set, how to play and the camera (first time), 3-2-1, results.
 const screens = createStartScreen(stage, {
+  cancel: () => queue.cancelSet(), // New set before the set starts: stop its downloads
   library: async () => {
     await queue.libraryReady();
     return queue.getState().library;
@@ -875,6 +883,7 @@ const screens = createStartScreen(stage, {
     try {
       await queue.readyToStart();
     } catch (cause) {
+      if (cause?.cancelled) throw cause; // left the set: not a loading failure
       const first = queue.getState().items[0];
       const name = first ? first.title.split(" - ").slice(1).join(" - ") || first.title : "the first song";
       // A song that downloaded but won't decode isn't a download problem.
