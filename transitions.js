@@ -220,12 +220,23 @@ export function createTransitions(deck) {
   function glideHome() {
     stopGlide();
     const from = nudge;
+    if (Math.abs(from - 1) < 0.001) return; // nothing to ease (manual hand blends never nudge)
     const started = deck.ctx.currentTime;
     glide = setInterval(() => {
       const done = Math.min(1, (deck.ctx.currentTime - started) / glideSeconds);
       setNudge(from + (1 - from) * done);
       if (done === 1) stopGlide();
     }, 250);
+  }
+
+  // Pausing mid-blend ends the outgoing tail at once, not at the next watch poll.
+  if (typeof deck.pause === "function") {
+    const pauseDeck = deck.pause.bind(deck);
+    deck.pause = (...args) => {
+      const result = pauseDeck(...args);
+      if (tail && deck.source !== tail.incoming) finish();
+      return result;
+    };
   }
 
   // Ends a transition now: stops the tail and plugs the new song straight into the deck.

@@ -513,8 +513,14 @@ async function startCamera() {
       video: { width: 1280, height: 720, facingMode: "user", frameRate: { ideal: CAMERA_FPS, max: CAMERA_FPS } },
       audio: false,
     });
-    video.srcObject = stream;
-    await video.play();
+    try {
+      video.srcObject = stream;
+      await video.play();
+    } catch (err) {
+      stream.getTracks().forEach((track) => track.stop());
+      video.srcObject = null;
+      throw err;
+    }
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     frameFx.resize(canvas.width, canvas.height);
@@ -1018,7 +1024,7 @@ function enterMode(m, forced = false) {
 
 // Is this hand a fist inside the zone for its side? Left edge = effects, right edge above the visuals corner = songs. (palmX is mirrored)
 const inFistZone = (h, side) => !!h && h.pose === "✊ fist" &&
-  (side === "right" ? h.palmX > 1 - FIST_ZONE_W && h.palmY < VIS_ZONE_Y : h.palmX < FIST_ZONE_W);
+  (side === "right" ? h.palmX > 1 - FIST_ZONE_W && h.palmY < VIS_ZONE_Y : h.palmX < FIST_ZONE_W && (!lock.locked || h.palmY >= LOCK_ZONE_Y));
 const inVisZone = (h) => !!h && h.pose === "✊ fist" && h.palmX > 1 - FIST_ZONE_W && h.palmY >= VIS_ZONE_Y;
 
 function updateModes(left, right, now) {
