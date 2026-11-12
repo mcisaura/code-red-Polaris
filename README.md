@@ -25,6 +25,8 @@ More gestures, on the hand tracker page `index.html` (**DJ Deck** in the top bar
 
 Songs come from the shared queue and library. DJ Deck keeps Song, Queue, Library and Up next visible in a sidebar beside the camera, including fullscreen. AI DJ/import tools expand on demand.
 
+Finger picks count the four fingers only: a thumb sticking out beside a point or a peace sign doesn't change the number. The thumb only matters with all four fingers up (open hand = 5).
+
 Keyboard test keys (no camera needed): `S` song mode, `←→` blend, `Enter` finish blend, `F` effects mode, `V` visuals mode, `1`–`5` pick, `↑↓` effect amount, `L` frame, `K` lock, `Esc` leave a mode.
 
 ### Arcade · 2P

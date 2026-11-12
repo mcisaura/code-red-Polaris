@@ -16,6 +16,7 @@
 - Other controls/help are hidden behind a toggle. Preserve the site's Aero styling.
 - Manual hand blends accept all tempos without beat alignment, speed matching or automatic bass cuts. Keep automatic AI DJ behavior distinct.
 - Comfortable hand ranges: blend palm Y .90→.55, effect palm Y .85→.40, volume distance .04→.42 of canvas width. Keep controls clear of the top lock zone (.32).
+- Finger picks (`fingerCount`) use the four fingers for 1-4; the thumb only turns four fingers into 5. Keep it that way: a resting thumb reads as extended too often to count on its own.
 - Bubble Aero includes particles escaping the polygon. Clear them when switching visual; keep emission bounded.
 - Do not restore the colorful startup test pattern. Synthetic preview is explicit (L or fake hands).
 - Text on the cream/glass panels needs at least 4.5:1 contrast. `--between` (#f5861f) is for bars and borders; orange text uses #8a4510.

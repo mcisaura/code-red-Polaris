@@ -262,6 +262,8 @@ const FINGER_STRAIGHT_DEG = 70;
 const FINGER_BEND_HYST_DEG = 10; // extended fingers may bend this much farther before switching off
 const THUMB_EXTEND_RATIO = 0.55; // thumb tip / index knuckle distance in palm lengths
 const THUMB_HYST_RATIO = 0.06;   // thumb must retract this far below the enter threshold to switch off
+const THUMB_MAX_BEND_DEG = 50;   // a thumb bent more than this at its last joint is not out
+const THUMB_AWAY_RATIO = 0.05;   // the tip must be this much (palm lengths) farther from the pinky knuckle than the thumb joint is
 const HAND_LABEL_CONFIDENCE = 0.8; // use confident handedness only as a soft identity hint
 const HAND_LABEL_PENALTY = 0.12; // normalized distance cost for disagreeing handedness
 const HAND_MATCH_MAX = 0.35;     // maximum wrist jump before resetting a track
@@ -619,7 +621,15 @@ function fingerBend(w, [mcp, pip, dip, tip]) {
   return bend;
 }
 // Thumb is "out" when its tip is well away from the index knuckle.
-const thumbExtension = (w, palm) => dist3(w[THUMB_TIP], w[INDEX_MCP]) / palm;
+// Thumb reach in palm lengths (tip to index knuckle), or 0 when the thumb can't be "out":
+// bent at its last joint, or folded across the palm (its tip nearer the pinky knuckle than
+// its own joint is). A thumb resting on curled fingers passes the reach test alone.
+function thumbExtension(w, palm) {
+  const bend = angleDeg(sub3(w[3], w[2]), sub3(w[THUMB_TIP], w[3]));
+  if (bend > THUMB_MAX_BEND_DEG) return 0;
+  if (dist3(w[THUMB_TIP], w[17]) < dist3(w[3], w[17]) + THUMB_AWAY_RATIO * palm) return 0;
+  return dist3(w[THUMB_TIP], w[INDEX_MCP]) / palm;
+}
 
 function classifyPose(ext, lms) {
   const [t, i, m, r, p] = ext;
@@ -1014,7 +1024,9 @@ function fillFit(text, x, y, size, weight, maxW) {
   if (w > maxW) ctx.font = `${weight} ${Math.max(10, Math.floor(size * maxW / w))}px system-ui, sans-serif`;
   ctx.fillText(text, x, y);
 }
-const fingerCount = (h) => h.ext.filter(Boolean).length;
+// The count for picking: the four fingers decide 1-4, so a thumb that sticks out beside a
+// point or a peace sign never changes the number. The thumb only turns four fingers into 5.
+const fingerCount = (h) => { const n = h.ext.slice(1).filter(Boolean).length; return n === 4 && h.ext[0] ? 5 : n; };
 
 function enterMode(m, forced = false) {
   modes.current = m;
