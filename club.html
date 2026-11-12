@@ -50,8 +50,14 @@
   h1 { margin: 0 8px 0 0; display: inline-flex; align-items: center; gap: 10px; font-size: 25px; font-weight: 900; color: #0b2f52; letter-spacing: -0.01em; }
   h1 a { display: inline-flex; align-items: center; gap: 10px; color: inherit; text-decoration: none; }
   h1 small { font-size: 12px; font-weight: 800; letter-spacing: 0.2em; color: #0a62ad; }
+  .navlink { display: inline-flex; align-items: center; min-height: 40px; padding: 0 16px; border-radius: 999px; border: 1px solid rgba(255,255,255,.95);
+    background: linear-gradient(180deg, rgba(255,255,255,.95), rgba(220,240,255,.75)); color: var(--text); font: 800 15px/1 'Nunito', sans-serif;
+    text-decoration: none; box-shadow: inset 0 1px 0 #fff, 0 6px 14px rgba(20,90,160,.14); }
+  .navlink:hover { background: #fff; }
+  .navlink:focus-visible { outline: 3px solid #ffad1f; outline-offset: 3px; }
+  .club-error button { margin-left: 8px; min-height: 34px; }
   #status { color: var(--muted); font-size: 13px; font-variant-numeric: tabular-nums; }
-  #calibMsg { color: #c8650c; font-weight: 800; }
+  #calibMsg { color: #8a4510; font-weight: 800; }
   button {
     position: relative;
     overflow: hidden;
@@ -144,7 +150,7 @@
   .control { font: 900 30px/1.1 'Nunito', sans-serif; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
   .left .control { color: #0a6bc0; }
   .right .control { color: #3f8f17; }
-  .between .control { color: #d9700f; }
+  .between .control { color: #8a4510; }
   .song input[type="url"] {
     width: 100%;
     background: rgba(255,255,255,.8);
@@ -176,6 +182,8 @@
 <div class="app">
 <header>
   <h1><a href="landing.html" title="Back to the home page"><svg width="34" height="34" viewBox="0 0 36 36" aria-hidden="true"><defs><radialGradient id="lg" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#ffffff"/><stop offset="0.2" stop-color="#9be0ff"/><stop offset="0.75" stop-color="#1e95e3"/><stop offset="1" stop-color="#0b62b0"/></radialGradient></defs><circle cx="18" cy="18" r="17" fill="url(#lg)"/><path d="M7 20c3-6 6 6 9 0s6 6 9 0 4 2 4 2" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><ellipse cx="13" cy="10" rx="6" ry="3.4" fill="#fff" opacity="0.75" transform="rotate(-25 13 10)"/></svg>AirDeck</a><small>CLUB</small></h1>
+  <a class="navlink" href="index.html">DJ Deck</a>
+  <a class="navlink" href="arcade-versus.html">Arcade</a>
   <button id="start" disabled>Loading model…</button>
   <button id="calibrate" class="secondary" disabled>Calibrate pinch</button>
   <span id="calibMsg"></span>
@@ -407,6 +415,7 @@ async function loadModel() {
   }
 }
 
+let streamOpen = null;
 async function startCamera() {
   startBtn.disabled = true;
   statusEl.textContent = "Requesting camera…";
@@ -415,8 +424,10 @@ async function startCamera() {
       video: { width: 1280, height: 720, facingMode: "user" },
       audio: false,
     });
+    streamOpen = stream;
     video.srcObject = stream;
     await video.play();
+    streamOpen = null;
     canvas.width = video.videoWidth;
     canvas.height = video.videoHeight;
     $("placeholder").remove();
@@ -424,6 +435,7 @@ async function startCamera() {
     calibBtn.disabled = false;
     scheduleFrame();
   } catch (err) {
+    if (streamOpen) { streamOpen.getTracks().forEach(t => t.stop()); streamOpen = null; video.srcObject = null; }   // play() failed after the camera opened: release it
     statusEl.textContent = "Camera error: " + err.message;
     startBtn.disabled = false;
   }
@@ -909,9 +921,11 @@ startBtn.addEventListener("click", () => (modelReady ? startCamera() : loadModel
 // ---- 3D club ---------------------------------------------------------------------
 // Background scene. It only reads the deck and the camera canvas; it never changes them.
 // If three.js can't be loaded, say so on the page instead of showing a blank background.
+let clubTries = 0;
 async function loadClub() {
   try {
-    const { createClub } = await import("./club.js");
+    // A retry adds a query string so the browser does not reuse the failed import.
+    const { createClub } = await import(clubTries ? "./club.js?retry=" + clubTries : "./club.js");
     createClub($("club"), {
       audio: () => ({ wave: deck.playing ? deck.waveform() : null, playing: deck.playing, ...controls }),
       camera: canvas,
@@ -922,6 +936,10 @@ async function loadClub() {
     const note = document.createElement("p");
     note.className = "club-error";
     note.textContent = "The 3D club could not load (check your connection). Hand tracking and the controls still work.";
+    const retry = document.createElement("button");
+    retry.textContent = "Retry";
+    retry.addEventListener("click", () => { note.remove(); clubTries++; loadClub(); });
+    note.appendChild(retry);
     $("club").appendChild(note);
   }
 }

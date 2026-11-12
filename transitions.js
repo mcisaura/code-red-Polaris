@@ -202,6 +202,7 @@ export function createTransitions(deck) {
   let speedHeld = false; // while the hands perform a mix, their pinch must not change the speed
   deck.setSpeed = (speed) => {
     if (speedHeld) return;
+    if (!Number.isFinite(speed)) return; // a NaN speed would stall mixInto's wait loop
     handSpeed = speed;
     // A song scheduled to start on a downbeat hasn't started yet: the next frame applies it.
     if (deck.ctx && deck.anchorTime > deck.ctx.currentTime) return;
@@ -432,7 +433,10 @@ export function createTransitions(deck) {
 
       // Wait for that moment (re-checking: the hands can change the speed meanwhile).
       for (;;) {
-        if (!stillWanted() || deck.buffer !== current || !deck.playing || !deck.source) return null;
+        if (!stillWanted() || deck.buffer !== current || !deck.playing || !deck.source) {
+          glideHome(); // the glide was stopped above: resume easing the tempo nudge back to 1
+          return null;
+        }
         const wait = (at - now()) / speed() - lead();
         if (wait <= 0.02) break;
         await sleep(Math.min(wait * 1000, 250));

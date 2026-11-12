@@ -1,10 +1,10 @@
 /* AirDeck shared look (Frutiger Aero): glass panels, glossy pill buttons, the
    top bar with the three mode tabs, and one "world" backdrop per mode.
 
-   Each app page links this file plus the Nunito font and sets a world on <body>:
-     <body class="world-water">   DJ Deck (mix.html)        aqua
-     <body class="world-hills">   Arcade · 2P (arcade-versus.html) lime
-     <body class="world-sunset">  AI DJ (index.html)        orange
+   Pages that link this file (index.html, ai-dj.html) plus the Nunito font set a world on <body>:
+     <body class="world-sunset">  DJ Deck (index.html) and AirMix (ai-dj.html)   orange
+   world-water (aqua) and world-hills (lime) are defined below but no page uses them now:
+   mix.html only redirects, and arcade-versus.html has its own styles and does not load this file.
    Page-specific layout stays in each page's own <style>. */
 
 :root {

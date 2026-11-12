@@ -441,7 +441,7 @@ function addStyles() {
   width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
   border: 1.5px solid #9fb6cc; font: bold 12px Tahoma, sans-serif; color: #fff; background: #fff;
 }
-.djStart-songs button[aria-selected="true"] .djStart-order { background: #2b8be0; border-color: #1b6bb8; }
+.djStart-songs button[aria-selected="true"] .djStart-order { background: #1565b0; border-color: #0f4f8e; }
 .djStart-song { display: flex; flex-direction: column; min-width: 0; }
 .djStart-song b, .djStart-song small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
 .djStart-song small { color: var(--muted); font-size: 11.5px; }
@@ -452,16 +452,16 @@ function addStyles() {
 .djStart-loading { min-height: 1.4em; font-size: 13px !important; color: var(--muted) !important; }
 .djStart-flow { display: flex; flex-wrap: wrap; justify-content: center; align-items: center; gap: 4px 6px; font-size: 13px !important; }
 .djStart-flow em { color: var(--muted); font-style: normal; }
-.djStart-mix { padding: 1px 7px; border-radius: 9px; font-size: 11px; color: #fff; background: #5cb82c; }
-.djStart-mix.cut { background: #f5861f; }
+.djStart-mix { padding: 1px 7px; border-radius: 9px; font-size: 11px; color: #12300a; background: #5cb82c; }
+.djStart-mix.cut { background: #f5861f; color: #2b1200; }
 
 .djStart-hands { display: flex; justify-content: center; gap: 14px; margin: 0 0 16px; }
 .djStart-hands span {
   width: 92px; padding: 14px 0; border-radius: 12px; font: bold 15px Tahoma, "Segoe UI", sans-serif;
-  color: #8a96a3; background: #f1f3f5; border: 2px dashed #c3ccd5; transition: background 0.15s, color 0.15s;
+  color: #566270; background: #f1f3f5; border: 2px dashed #c3ccd5; transition: background 0.15s, color 0.15s;
 }
-.djStart-hands span.seen[data-side="left"] { color: #fff; background: #1e95e3; border: 2px solid #1e95e3; }
-.djStart-hands span.seen[data-side="right"] { color: #fff; background: #5cb82c; border: 2px solid #5cb82c; }
+.djStart-hands span.seen[data-side="left"] { color: #fff; background: #0a6bc0; border: 2px solid #0a6bc0; }
+.djStart-hands span.seen[data-side="right"] { color: #12300a; background: #5cb82c; border: 2px solid #5cb82c; }
 .djStart-skip { min-width: 0; font-size: 13px; }
 .djStart kbd {
   padding: 1px 6px; border-radius: 3px; border: 1px solid #9fb6cc; border-bottom-width: 2px;
@@ -494,7 +494,7 @@ function addStyles() {
 @media (prefers-reduced-motion: reduce) { .djStart-count, .djStart-grade { animation: none; } }
 @media (max-width: 560px) {
   /* Phones: the panels get the whole screen (the 16:9 camera stage is too short for them). */
-  .djStart { position: fixed; inset: 0; z-index: 50; }
+  .djStart { position: fixed; inset: var(--djTop, 0px) 0 0 0; z-index: 50; } /* below the top bar, so home / DJ Deck / Arcade stay reachable (the page sets --djTop) */
   .djStart-row button, .djStart-row button.secondary { min-width: 0; }
   .djStart-moves { grid-template-columns: repeat(2, 1fr); }
   .djStart-stats { grid-template-columns: repeat(3, 1fr); }

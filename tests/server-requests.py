@@ -227,6 +227,61 @@ try:
 finally:
     server.YTDLP = saved_ytdlp
 
+# Repeat branch: every real library song queued AND played still picks, never the playing song.
+real = json.loads((Path(__file__).resolve().parents[1] / 'library.json').read_text(encoding='utf-8'))['songs']
+assert len(real) == 25
+labels = [f"{song['artist']} - {song['title']}" for song in real]
+status, body = pick({'library': real, 'count': 3, 'nowPlaying': labels[4], 'queued': labels, 'played': labels})
+assert status == 200 and len(body['picks']) == 3, (status, body)
+assert all(p['id'] != real[4]['id'] for p in body['picks']), body
+# Played longest ago comes first when everything is queued too.
+status, body = pick({'library': LIBRARY, 'count': 1, 'queued': ['A - T', 'B - U', 'C - V'], 'played': ['C - V', 'A - T', 'B - U']})
+assert status == 200 and body['picks'][0]['id'] == 'hhh111HHH11', body
+# A small library never repeats the song now playing.
+status, body = pick({'library': LIBRARY[:2], 'count': 3, 'nowPlaying': 'A - T', 'queued': [], 'played': ['A - T']})
+assert status == 200 and [p['id'] for p in body['picks']] == ['xyz987QRS65'], body
+status, body = pick({'library': LIBRARY[:2], 'count': 2, 'nowPlaying': 'A - T', 'queued': ['A - T', 'B - U'], 'played': ['A - T', 'B - U']})
+assert status == 200 and [p['id'] for p in body['picks']] == ['xyz987QRS65'], body
+# A one-song library falls back to that song instead of failing.
+assert pick({'library': LIBRARY[:1], 'count': 1, 'nowPlaying': 'A - T', 'played': ['A - T']})[0] == 200
+
+# Filler words don't substring-match names: "something for the party" is an energy opener, not "Nice For What".
+nice = [dict(LIBRARY[0], artist='Drake', title='Nice For What', bpm=90), dict(LIBRARY[1], bpm=130), LIBRARY[2]]
+status, body = pick({'library': nice, 'count': 1, 'vibe': 'something for the party'})
+assert status == 200 and body['picks'][0]['id'] == 'xyz987QRS65' and body['picks'][0]['reason'] == 'high-energy opener', body
+# A whole word still matches ("nice" is a real title word), a partial one does not.
+assert pick({'library': nice, 'count': 1, 'vibe': 'nice'})[1]['picks'][0]['id'] == 'abc123DEF45'
+partial = pick({'library': nice, 'count': 1, 'vibe': 'wha'})[1]['picks'][0]
+assert partial['reason'] == 'starts the set', partial
+
+# Library ids must be strings (400, not a dropped connection); long ids still resolve consistently.
+for bad in ([['x']], 12345, {'a': 1}, None):
+    status, _ = pick({'library': [dict(LIBRARY[0], id=bad)], 'count': 1})
+    assert status == 400, bad
+long_id = 'L' * 40
+long_library = [dict(LIBRARY[0], id=long_id), LIBRARY[1]]
+status, body = pick({'library': long_library, 'count': 2, 'vibe': 'house'})
+assert status == 200 and len(body['picks']) == 2 and body['picks'][0]['id'] == 'L' * 20, body
+
+# /api/progressZZZ is not the progress route (it goes on to static serving).
+served = []
+saved_get = server.SimpleHTTPRequestHandler.do_GET
+server.SimpleHTTPRequestHandler.do_GET = lambda self: served.append(self.path)
+try:
+    for path, expected in (('/api/progress?job=x', []), ('/api/progress', []), ('/api/progressZZZ', ['/api/progressZZZ']),
+                           ('/api/progressZZZ?job=x', ['/api/progressZZZ?job=x'])):
+        served.clear()
+        handler = object.__new__(server.Handler)
+        handler.path = path
+        handler.headers = Message()
+        handler.headers['Host'] = LOCAL
+        answers = []
+        handler.send_json = lambda status, body: answers.append(status)
+        handler.do_GET()
+        assert served == expected and answers == ([200] if not expected else []), (path, served, answers)
+finally:
+    server.SimpleHTTPRequestHandler.do_GET = saved_get
+
 # Valid shape still reaches the picker; replace only the external service boundary.
 assert status_of(ok_body) == 200
 print('PASS: origin/Host checks, offline AI DJ picks, the removed voice route, malformed input, the download cache and yt-dlp-missing errors all return clean responses')

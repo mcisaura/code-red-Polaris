@@ -2,6 +2,7 @@
 <html lang="en">
 <head>
 <meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
 <title>AirDeck · Arcade 2P</title>
 <link href="https://fonts.googleapis.com/css2?family=Nunito:wght@400;600;700;800;900&display=swap" rel="stylesheet">
 <style>
@@ -75,7 +76,7 @@ body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction
   .title .arrow { width: 36px; height: 36px; border-radius: 50%; border: 1px solid #fff; background: linear-gradient(180deg, #fff, #e3f1fb); color: #0a62ad; font-size: 18px; font-weight: 900; box-shadow: 0 3px 8px rgba(18,92,160,.15); }
   .title .name { min-width: 300px; text-align: center; line-height: 1.1; }
   .title .name b { font-size: 19px; font-weight: 900; }
-  .title .name i { font-style: normal; font-size: 19px; font-weight: 900; color: #d9700f; }
+  .title .name i { font-style: normal; font-size: 19px; font-weight: 900; color: #8a4510; }
   .dots { display: flex; justify-content: center; gap: 6px; margin-top: 3px; }
   .dots span { width: 8px; height: 8px; border-radius: 50%; background: rgba(120,180,225,.45); }
   .dots span.on { background: #1e95e3; width: 22px; border-radius: 4px; }
@@ -86,7 +87,7 @@ body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction
   .tag .orb { width: 52px; height: 52px; font-size: 18px; }
   .tag b { display: block; font-size: 20px; font-weight: 900; }
   .tag span { font-size: 13px; color: #2b5a82; }
-  .tag .found { color: #3f8f17; font-weight: 800; }
+  .tag .found { color: #2f6e10; font-weight: 800; }
   .score { display: flex; align-items: baseline; justify-content: space-between; padding: 0 4px; }
   .score b { font-size: 60px; font-weight: 900; line-height: 1; }
   .score span { font-size: 13px; font-weight: 800; letter-spacing: .12em; color: #2b5a82; }
@@ -101,7 +102,7 @@ body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction
 
   /* Widgets */
   .pad { position: relative; width: 168px; height: 168px; }
-  .key { position: absolute; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 16px; font-size: 24px; font-weight: 900; color: #7da6c6;
+  .key { position: absolute; width: 56px; height: 56px; display: grid; place-items: center; border-radius: 16px; font-size: 24px; font-weight: 900; color: #3f6482;
     background: linear-gradient(180deg, #fff, #e3f1fb); border: 1px solid #fff; box-shadow: 0 4px 10px rgba(18,92,160,.15), inset 0 -2px 0 rgba(120,180,225,.35); }
   .pad .u { left: 56px; top: 0; } .pad .d { left: 56px; bottom: 0; } .pad .l { left: 0; top: 56px; } .pad .r { right: 0; top: 56px; }
   .pad .c { left: 56px; top: 56px; border-radius: 50%; background: radial-gradient(circle at 34% 28%, #fff, #d8ecfa); }
@@ -148,12 +149,12 @@ body { margin: 0; height: 100vh; overflow: hidden; display: flex; flex-direction
   .overlay h2 { margin: 0; font-size: 46px; font-weight: 900; color: #0b2f52; }
   .overlay p { margin: 8px auto 0; max-width: 520px; font-size: 17px; line-height: 1.5; color: #2b5a82; }
   .overlay p b { color: #0b2f52; }
-  .overlay .count { font-size: 140px; font-weight: 900; color: #d9700f; line-height: 1; }
+  .overlay .count { font-size: 140px; font-weight: 900; color: #8a4510; line-height: 1; }
   .overlay .pill { margin-top: 22px; min-height: 56px; padding: 0 34px; font-size: 20px; }
-  .overlay .keys { margin-top: 14px; font-size: 13px; color: #5a7fa0; }
+  .overlay .keys { margin-top: 14px; font-size: 13px; color: #3f6482; }
 
   /* Phones and narrow screens: one column, the board first and the two player panels below it, and the page scrolls. */
-  @media (max-width: 800px) {
+  @media (max-width: 1100px) {
     html, body { height: auto; min-height: 100vh; overflow: auto; }
     header { grid-template-columns: minmax(0, 1fr); gap: 8px; margin: 10px 10px 0; padding: 8px 10px; border-radius: 24px; }
     header .zone { flex-wrap: wrap; justify-content: center; }
@@ -236,19 +237,43 @@ async function loadModel() {
   try { landmarker = await HandLandmarker.createFromOptions(fileset, options("GPU")); }
   catch { landmarker = await HandLandmarker.createFromOptions(fileset, options("CPU")); }
 }
-loadModel().then(() => {
-  $("camBtn").disabled = false; $("camBtn").textContent = "Start camera";
-}).catch(() => {
-  $("camBtn").textContent = "Model failed"; $("status").textContent = $("status").title = "Hand model could not load · keyboard still works";
-});
+// Loads the hand model once; after a failure the next click on the button loads it again.
+let modelLoading = null;
+function ensureModel() {
+  if (!modelLoading) {
+    $("camBtn").disabled = true; $("camBtn").textContent = "Loading model…";
+    modelLoading = loadModel().then(() => {
+      $("camBtn").disabled = false; $("camBtn").textContent = "Start camera";
+    }, () => {
+      modelLoading = null;
+      $("camBtn").disabled = false; $("camBtn").textContent = "Retry model";
+      $("status").textContent = $("status").title = "Hand model could not load · click Retry model · keyboard still works";
+      throw new Error("model");
+    });
+  }
+  return modelLoading;
+}
+ensureModel().catch(() => {});
 
 $("camBtn").onclick = async () => {
+  if (!landmarker) { ensureModel().catch(() => {}); return; }   // a failed model load is retried by the next click
+  let stream = null;
   try {
-    video.srcObject = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: "user" }, audio: false });
+    stream = await navigator.mediaDevices.getUserMedia({ video: { width: 1280, height: 720, facingMode: "user" }, audio: false });
+    video.srcObject = stream;
     await video.play();
     camOn = true; document.body.classList.add("camera-on");
     $("camBtn").textContent = "Camera on"; $("camBtn").classList.replace("aqua", "ghost"); $("camBtn").disabled = true;
+    const track0 = stream.getVideoTracks()[0];
+    if (track0) track0.addEventListener("ended", () => {   // unplugged or revoked: drop the hands and let the player start again
+      camOn = false; document.body.classList.remove("camera-on");
+      dropHand(1); dropHand(2);
+      $("camBtn").textContent = "Start camera"; $("camBtn").classList.replace("ghost", "aqua"); $("camBtn").disabled = false;
+      $("status").textContent = "Camera stopped: click Start camera to retry";
+    });
   } catch (e) {
+    if (stream) stream.getTracks().forEach(t => t.stop());   // play() failed after the camera opened: release it
+    video.srcObject = null;
     $("status").textContent = "Camera blocked: allow it in the address bar";
   }
 };
@@ -279,10 +304,14 @@ function readHand(lm, p) {
 
 // Camera data is dropped as soon as its source is gone (no camera, or no hand), so it never outlives that.
 function dropHand(p) { Object.assign(input[p], { present: false, lm: null, dir: null, tip: null, gesture: null }); }
+let lastFrameAt = 0;
 function track(now) {
   if (!camOn || !landmarker || video.readyState < 2) { dropHand(1); dropHand(2); return; }
-  if (video.currentTime === lastVideoTime) return;
-  lastVideoTime = video.currentTime;
+  if (video.currentTime === lastVideoTime) {
+    if (now - lastFrameAt > 500) { dropHand(1); dropHand(2); }   // frames stopped arriving: stale hands must not linger
+    return;
+  }
+  lastVideoTime = video.currentTime; lastFrameAt = now;
   const res = landmarker.detectForVideo(video, now);
   const seen = { 1: null, 2: null };
   for (const lm of res.landmarks) {
@@ -318,6 +347,7 @@ const tipOf = (p) => (isHeld(p) ? input[p].cursor : input[p].tip);   // keyboard
 const gestureOf = (p) => input[p].gesture || input[p].keyGesture;
 function clearHeld() { for (const p of [1, 2]) input[p].held = []; }
 addEventListener("keydown", (e) => {
+  if (e.ctrlKey || e.metaKey || e.altKey) return;   // browser shortcuts (Cmd+S, Ctrl+R) are not game keys
   const k = e.key.toLowerCase();
   if (k === " ") { e.preventDefault(); overlayAction(); return; }
   const m = KEYS[k]; if (!m) return;
@@ -885,6 +915,7 @@ function resetMatch() {
 }
 function startRound() {
   state.score = { 1: 0, 2: 0 }; state.game.init(); state.timeLeft = state.game.roundTime || 0;
+  paused = false; pauseLabel();   // Pause on the idle/round-over overlay must not freeze the new countdown
   state.phase = "countdown"; state.count = 3; beep(440);
   musicSync();
   showOverlay();

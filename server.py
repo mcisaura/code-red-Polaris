@@ -30,9 +30,9 @@ ROOT = Path(__file__).parent
 
 
 def load_env_file(path):
-    """Settings from a local .env file (KEY=value per line, # for comments), so the API
-    keys survive restarts and new windows. Anything already set in the environment wins.
-    The file is gitignored: keys never get committed. Warnings never show its contents."""
+    """Settings from a local .env file (KEY=value per line, # for comments), such as AIRDECK_HOST,
+    so they survive restarts and new windows. Anything already set in the environment wins.
+    The file is gitignored: it never gets committed. Warnings never show its contents."""
     if not path.exists():
         return
     if not path.is_file():
@@ -140,6 +140,8 @@ if shutil.which("ffmpeg"):
 progress = {}  # job -> {"stage": "searching" | "downloading", "percent": number or None}
 progress_lock = threading.Lock()
 PROGRESS_MARK = "AIRDECK-PROGRESS"
+TITLE_MARK = "AIRDECK-TITLE"
+FILE_MARK = "AIRDECK-FILE"
 YTDLP_MISSING = 'yt-dlp isn\'t installed on the server (pip install -U "yt-dlp[default]")'
 
 
@@ -160,8 +162,9 @@ def download(url, extra, job=None):
         "--retries", "3",
         "-o", str(DOWNLOADS / "%(id)s.%(ext)s"),
         "--no-simulate",
-        "--print", "title",
-        "--print", "after_move:filepath",
+        # Sentinel prefixes, so a title like "[MV] Song" or "ERROR: x" isn't mistaken for yt-dlp's own output.
+        "--print", f"{TITLE_MARK} %(title)s",
+        "--print", f"after_move:{FILE_MARK} %(filepath)s",
         # One machine-readable progress line per update (shown even though --print makes it quiet).
         "--progress", "--newline",
         "--progress-template",
@@ -184,12 +187,17 @@ def download(url, extra, job=None):
 
     timer = threading.Timer(180, stop)
     timer.start()
-    printed, errors = [], []
+    title = filepath = None
+    errors = []
     missing = False
     try:
         for line in proc.stdout:
             line = line.strip()
-            if "No module named" in line and "yt_dlp" in line:  # python -m yt_dlp isn't installed
+            if line.startswith(TITLE_MARK + " "):
+                title = line[len(TITLE_MARK) + 1:].strip()
+            elif line.startswith(FILE_MARK + " "):
+                filepath = line[len(FILE_MARK) + 1:].strip()
+            elif "No module named" in line and "yt_dlp" in line:  # python -m yt_dlp isn't installed
                 missing = True
             elif line.startswith(PROGRESS_MARK):
                 numbers = []
@@ -203,19 +211,18 @@ def download(url, extra, job=None):
                     set_progress(job, stage="downloading", percent=min(100.0, done * 100 / (total or estimate)))
             elif line.startswith("ERROR:"):
                 errors.append(line)
-            elif line and not line.startswith(("WARNING:", "[")):
-                printed.append(line)  # what --print asked for: the title, then the file path
         proc.wait()
     finally:
         timer.cancel()
+        proc.stdout.close()
     if missing:
         return None, YTDLP_MISSING
     if timed_out.is_set():
         return None, "download timed out"
     # 101 means "stopped at --max-downloads", which is fine.
-    if proc.returncode not in (0, 101) or len(printed) < 2:
+    if proc.returncode not in (0, 101) or not title or not filepath:
         return None, (errors or ["download failed"])[-1]
-    return (printed[0], Path(printed[-1])), None
+    return (title, Path(filepath)), None
 
 
 def load_index():
@@ -251,9 +258,21 @@ def remember(target, entry):
             print(f"[youtube] couldn't save the download index: {error}", flush=True)
 
 
+target_locks = {}  # cache key -> lock, so one target is never downloaded twice at once
+target_locks_lock = threading.Lock()
+
+
 def get_song(target, job=None):
     """The song's {"file", "title"}, downloading it unless it was downloaded before.
-    Returns (entry, None) or (None, error message)."""
+    Returns (entry, None) or (None, error message). Simultaneous requests for one target
+    wait for the first download instead of running yt-dlp onto the same file."""
+    with target_locks_lock:
+        lock = target_locks.setdefault(cache_key(target), threading.Lock())
+    with lock:
+        return fetch_song(target, job)
+
+
+def fetch_song(target, job=None):
     hit = remembered(target)
     if hit:
         print(f"[youtube] already downloaded: {hit['title']}", flush=True)
@@ -311,6 +330,12 @@ CALM_WORDS = ("chill", "slow", "relax", "calm", "mellow", "soft", "smooth", "lof
 ENERGY_WORDS = ("hype", "party", "energy", "fast", "banger", "turn up", "lit", "dance", "club", "workout", "gym", "hard")
 # Vibe words that name a library genre by another name.
 GENRE_ALIASES = {"rap": "hip-hop", "rnb": "r&b"}
+# Filler words of a vibe ("something for the party") that mustn't match a song's name.
+STOP_WORDS = {
+    "the", "for", "and", "some", "something", "music", "song", "songs", "play", "with", "get", "into", "that",
+    "this", "have", "just", "like", "want", "give", "make", "feel", "feeling", "vibe", "vibes", "mix", "set",
+    "start", "put", "bit", "all", "any", "you", "your", "can", "now", "then", "from", "very", "really", "more",
+}
 
 
 def dj_pick(request):
@@ -324,10 +349,11 @@ def dj_pick(request):
     vibe (genre, artist or title) starts the set.
     """
     count = max(1, min(int(request.get("count") or 3), 5))
+    # Keyed by the cleaned id, and the songs carry it too, so every lookup below agrees.
     library = {
-        clean(song.get("id", ""), 20): song
+        clean(song["id"], 20): {**song, "id": clean(song["id"], 20)}
         for song in request.get("library") or []
-        if isinstance(song, dict) and song.get("id")
+        if isinstance(song, dict) and isinstance(song.get("id"), str) and clean(song["id"], 20)
     }
     if not library:
         raise DjError("send the song library to pick from")
@@ -335,8 +361,9 @@ def dj_pick(request):
     # Songs already queued or played, by the "artist - title" label the page uses.
     label = lambda s: f"{clean(s.get('artist', ''), 80)} - {clean(s.get('title', ''), 120)}".lower()
     used = {clean(t, 200).lower() for t in [*request.get("queued", []), *request.get("played", [])]}
-    unused = [s for s in library.values() if label(s) not in used]
     playing = next((s for s in library.values() if label(s) == clean(request.get("nowPlaying") or "", 200).lower()), None)
+    # The song now playing is never picked again right away.
+    unused = [s for s in library.values() if label(s) not in used and s is not playing]
     order = {song_id: number for number, song_id in enumerate(library)}
     genre = lambda s: clean(s.get("genre", ""), 40).lower()
     first_genre = lambda s: genre(s).split("/")[0].strip()
@@ -344,18 +371,19 @@ def dj_pick(request):
     if not unused:
         played_order = {clean(t, 200).lower(): n for n, t in enumerate(request.get("played", []))}
         queued = {clean(t, 200).lower() for t in request.get("queued", [])}
+        others = [s for s in library.values() if s is not playing] or list(library.values())
         unused = sorted(
-            (s for s in library.values() if label(s) not in queued),
+            [s for s in others if label(s) not in queued] or others,
             key=lambda s: played_order.get(label(s), -1),
         )[: max(count, len(library) // 2)]
 
     def closest(after, choices):
         """The song that follows `after` best: same genre, then nearest tempo, then nearest in the set order."""
-        here = order.get(clean(after.get("id", ""), 20), 0)
+        here = order.get(after["id"], 0)
         return min(choices, key=lambda s: (
             genre(s) != genre(after),
             tempo_gap(bpm(after), bpm(s)),
-            abs(order[clean(s.get("id", ""), 20)] - here),
+            abs(order[s["id"]] - here),
         ))
 
     def opener(choices):
@@ -365,11 +393,10 @@ def dj_pick(request):
         (felt at about 78) count as slower than an 80 BPM ballad, the opposite of how they sound."""
         vibe = clean(request.get("vibe") or "", 200).lower()
         tokens = re.findall(r"[a-z0-9&]+", vibe)
-        words = [GENRE_ALIASES.get(w, w) for w in tokens if len(w) >= 3]
-        # Mood words only count as whole words here ("dance" matches "edm / dance", but "hard"
-        # mustn't match "Richard" or "sad" match "Sade"); other words match any part of a name.
-        mood = set(CALM_WORDS + ENERGY_WORDS)
-        hits = lambda word, text: re.search(rf"\b{re.escape(word)}\b", text) if word in mood else word in text
+        words = [GENRE_ALIASES.get(w, w) for w in tokens if len(w) >= 3 and w not in STOP_WORDS]
+        # Words only match whole words ("dance" matches "edm / dance", but "hard" mustn't match
+        # "Richard", "sad" "Sade" or "for" "Nice For What").
+        hits = lambda word, text: re.search(rf"(?<![a-z0-9]){re.escape(word)}(?![a-z0-9])", text)
         for song in choices:
             text = f"{genre(song)} {label(song)}"
             if any(hits(word, text) for word in words):
@@ -414,6 +441,15 @@ def dj_pick(request):
 # ---- HTTP --------------------------------------------------------------------------
 
 LOCAL_NAMES = {"localhost", "127.0.0.1"}
+PRIVATE_SUFFIXES = (".md", ".py", ".cjs", ".example")
+
+
+def is_progress_path(url):
+    """True when url's path (before any query string) is exactly /api/progress."""
+    try:
+        return urlsplit(url).path == "/api/progress"
+    except ValueError:
+        return False
 
 
 def is_this_server(url):
@@ -438,12 +474,14 @@ class Handler(SimpleHTTPRequestHandler):
     # after every response), Windows often cut off the last ~32 KB of a song file and
     # hung for ~19 s before resetting: about half of all song loads failed.
     protocol_version = "HTTP/1.1"
+    # A stalled or half-sent request must not hold its thread forever.
+    timeout = 30
 
     def __init__(self, *args, **kwargs):
         super().__init__(*args, directory=str(ROOT), **kwargs)
 
     def home_is_landing(self):
-        # The landing page is the home page (index.html is the hand tracker, ai-dj.html the AI DJ).
+        # The landing page is the home page (index.html is the hand tracker, ai-dj.html is AirMix).
         try:
             parts = urlparse(self.path)
         except ValueError:  # a malformed URL such as "//[": not the home page; send_head refuses it
@@ -465,12 +503,27 @@ class Handler(SimpleHTTPRequestHandler):
             return True
         return any(part.startswith(".") for part in parts)
 
+    def is_private_source(self):
+        """True for files that aren't site assets: docs, Python, Node tests and example config,
+        anything under tests/, and the download index. Checks the file the URL resolves to
+        (so a symlink or a different letter case can't dodge it)."""
+        try:
+            site = Path(self.directory).resolve()
+            parts = [part.lower() for part in Path(self.translate_path(self.path)).resolve().relative_to(site).parts]
+        except (ValueError, OSError, RuntimeError):
+            return True
+        return (
+            "tests" in parts
+            or bool(parts) and parts[-1].endswith(PRIVATE_SUFFIXES)
+            or parts == ["downloads", "index.json"]
+        )
+
     def send_head(self):
         # Local configuration and Git metadata are never browser assets. Decode
         # before checking so an encoded dot cannot bypass the restriction.
         try:
             path = unquote(urlparse(self.path).path)
-            if "\x00" not in path and not self.is_hidden(path):
+            if "\x00" not in path and not self.is_hidden(path) and not self.is_private_source():
                 return super().send_head()
         except ValueError:  # a malformed URL, a NUL byte, or a name the system can't open
             pass
@@ -499,7 +552,7 @@ class Handler(SimpleHTTPRequestHandler):
 
     def do_GET(self):
         self.home_is_landing()
-        if self.path.startswith("/api/progress"):
+        if is_progress_path(self.path):
             if not self.api_allowed():
                 return self.send_json(403, {"error": "forbidden origin"})
             job = parse_qs(urlparse(self.path).query).get("job", [""])[0]
@@ -511,7 +564,7 @@ class Handler(SimpleHTTPRequestHandler):
     def log_message(self, format, *args):
         # The page polls progress several times a second; keep that out of the log.
         # getattr: a request that failed early may have no path yet.
-        if not getattr(self, "path", "").startswith("/api/progress"):
+        if not is_progress_path(getattr(self, "path", "")):
             super().log_message(format, *args)
 
     def do_POST(self):
@@ -572,7 +625,9 @@ class Handler(SimpleHTTPRequestHandler):
                 if field in body and (not isinstance(body[field], list) or
                                       any(not isinstance(value, str) for value in body[field])):
                     raise ValueError
-            if "library" in body and not isinstance(body["library"], list):
+            if "library" in body and (not isinstance(body["library"], list) or any(
+                    isinstance(song, dict) and "id" in song and not isinstance(song["id"], str)
+                    for song in body["library"])):
                 raise ValueError
         except (ValueError, TypeError, OverflowError):
             return self.send_json(400, {"error": "invalid DJ request fields"})

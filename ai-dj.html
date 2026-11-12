@@ -85,7 +85,7 @@
   .control { font: 900 30px/1.1 'Nunito', sans-serif; font-variant-numeric: tabular-nums; margin-bottom: 4px; }
   .left .control { color: #0a6bc0; }
   .right .control { color: #3f8f17; }
-  .between .control { color: #c35f08; }
+  .between .control { color: #8a4510; }
   .setButtons { display: flex; gap: 8px; }
   .setButtons button { flex: 1; min-height: 34px; padding: 0 12px; font-size: 13px; }
   #songStatus { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
@@ -207,6 +207,13 @@ const video = document.getElementById("video");
 const canvas = document.getElementById("canvas");
 const ctx = canvas.getContext("2d");
 const startBtn = document.getElementById("start");
+// On phones the set picker covers the screen below the top bar, so home / DJ Deck / Arcade stay reachable.
+const topbarEl = document.querySelector(".topbar");
+const syncTopbar = () => document.documentElement.style.setProperty("--djTop", `${Math.max(0, Math.round(topbarEl.getBoundingClientRect().bottom))}px`);
+syncTopbar();
+addEventListener("resize", syncTopbar);
+addEventListener("scroll", syncTopbar, { passive: true });
+new ResizeObserver(syncTopbar).observe(topbarEl);
 const calibBtn = document.getElementById("calibrate");
 const statusEl = document.getElementById("status");
 const calibMsg = document.getElementById("calibMsg");
@@ -328,7 +335,14 @@ function ensureModel() {
   return modelLoading;
 }
 
-async function startCamera() {
+// One camera request at a time, and one frame loop ever: callers share the in-flight promise.
+let cameraStarting = null;
+let frameLoopRunning = false;
+function startCamera() {
+  cameraStarting ??= startCameraOnce().finally(() => (cameraStarting = null));
+  return cameraStarting;
+}
+async function startCameraOnce() {
   startBtn.disabled = true;
   statusEl.textContent = "Requesting camera…";
   try {
@@ -352,7 +366,10 @@ async function startCamera() {
     $("placeholder")?.remove();
     startBtn.textContent = "Camera on";
     calibBtn.disabled = false;
-    scheduleFrame();
+    if (!frameLoopRunning) {
+      frameLoopRunning = true;
+      scheduleFrame();
+    }
     return true;
   } catch (err) {
     const message = cameraError(err);
@@ -867,7 +884,7 @@ const screens = createStartScreen(stage, {
     } catch (error) {
       return error.message; // the hand tracking didn't load: the camera step says so (and retries it)
     }
-    return video.srcObject ? true : startCamera();
+    return cameraStarting ?? (video.srcObject ? true : startCamera());
   },
   handSeen: (side) => performance.now() - sides[side].lastSeen < 300,
   loadingText: () => {
@@ -1009,7 +1026,7 @@ async function leaveSet() {
 $("pauseBtn").addEventListener("click", () => (phase === "paused" ? resumeSet() : pauseSet()));
 $("restartBtn").addEventListener("click", restartSet);
 document.addEventListener("keydown", (event) => {
-  if (!inSet || event.repeat || event.target.closest?.("input, textarea")) return;
+  if (!inSet || event.repeat || event.ctrlKey || event.metaKey || event.altKey || event.target.closest?.("input, textarea")) return;
   if (event.code === "Space" || event.code === "KeyP") {
     event.preventDefault(); // not a click on whatever button has focus
     phase === "paused" ? resumeSet() : pauseSet();

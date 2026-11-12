@@ -170,14 +170,14 @@
   <nav class="modes" aria-label="Modes"><a class="dj" href="index.html" aria-current="page">DJ Deck</a><a class="arcade" href="arcade-versus.html">Arcade</a></nav>
   <button id="start" disabled>Loading model…</button>
   <span class="note" id="calibMsg"></span>
-  <span class="status" id="status"></span>
+  <span class="status" id="status" role="status" aria-live="polite"></span>
 </header>
 
 <main id="deckWorkspace">
   <div class="stage" id="cameraStage">
     <div class="stage-actions"><button id="fullscreenBtn" class="secondary" aria-pressed="false">Full screen</button></div>
     <video id="video" playsinline muted></video>
-    <canvas id="canvas" width="1280" height="720"></canvas>
+    <canvas id="canvas" width="1280" height="720" role="img" aria-label="Camera view with hand-tracking overlay for DJ gestures"></canvas>
     <div class="placeholder" id="placeholder"><div class="title">AirDeck</div><div class="hint" id="placeholderHint">Click “Start camera”, then show both hands</div></div>
   </div>
 
@@ -186,7 +186,7 @@
     <div class="song" id="songCard">
       <h2><span>Song</span><span class="queueBadge">Queue <span id="queueCount">0</span></span></h2>
       <div id="transport"></div>
-      <div id="songStatus">Pick songs from the library below or start the AI DJ.</div>
+      <div id="songStatus" role="status" aria-live="polite">Pick songs from the library below or start the AI DJ.</div>
     </div>
     <div id="queueMount"></div>
     </div>
@@ -1142,9 +1142,13 @@ function pick(n) {
 
 // Keyboard test keys (also a backup if tracking struggles during a demo)
 window.addEventListener("keydown", (e) => {
-  if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.repeat) return;
+  if (e.target.tagName === "INPUT" || e.metaKey || e.ctrlKey || e.altKey || e.defaultPrevented || e.repeat) return;
   if (!e.key) return;
   const k = e.key.toLowerCase();
+  // Enter/Space/arrows belong to a focused button, link, slider or select (Alt+arrows reorder queue rows)
+  const onControl = e.target.closest?.("button, a, select, textarea, summary, [role=slider], [role=button]")
+    || ["BUTTON", "A", "SELECT", "TEXTAREA"].includes(e.target.tagName) || e.target.getAttribute?.("role") === "slider";
+  if (onControl && (k === "enter" || k === " " || k.startsWith("arrow"))) return;
   if (k === "d") trackingDebug.enabled = !trackingDebug.enabled;
   else if (k === "s") enterMode(modes.current === "song" ? "normal" : "song", true);
   else if (k === "f") enterMode(modes.current === "fx" ? "normal" : "fx", true);
@@ -1186,7 +1190,9 @@ const blend = { active: false, starting: false, p: 0, sweep: 0, since: 0, lastIn
 const songTitle = (item) => (item ? [item.artist, item.title].filter(Boolean).join(" - ") || item.title || "song" : "song");
 
 async function nextSong() {
-  if (blend.active || blend.starting) return;
+  // A second press during a blend finishes it right away (like Enter), so ⏭ is never ignored.
+  if (blend.active) { finishBlend(); return; }
+  if (blend.starting) { blend.finishAfterStart = true; return; }
   const { items, currentId } = queue.getState();
   const candidate = queue.getUpNext()?.item ?? items[0];
   const next = candidate?.id === currentId ? null : candidate;
@@ -1222,6 +1228,7 @@ async function nextSong() {
     return;
   }
   blend.starting = true;
+  blend.finishAfterStart = false;
   flash(`⏭ Mixing into ${songTitle(next)}`);
   const controls = await queue.startHandMix().catch(() => null);
   blend.starting = false;
@@ -1236,6 +1243,22 @@ async function nextSong() {
     from: songTitle(items.find((item) => item.id === currentId)), to: songTitle(next) });
   controls.setIncoming(0);
   controls.setOutgoing(1);
+  watchBlend();
+  if (blend.finishAfterStart) { blend.finishAfterStart = false; finishBlend(); }
+}
+
+// Timer fallback: frame callbacks and rAF stop in a hidden tab, so without this an active blend
+// would never reach its idle auto-finish and the incoming song would stay at gain 0.
+let blendWatch = 0;
+function watchBlend() {
+  if (blendWatch) return;
+  blendWatch = setTimeout(() => {
+    blendWatch = 0;
+    if (!blend.active) return;
+    const now = performance.now();
+    if (now - blend.last > 750) updateBlend(null, null, now);   // no frame has driven it lately
+    watchBlend();
+  }, 500);
 }
 
 function finishBlend(secs = BLEND_AUTO_SECS) {
@@ -2076,8 +2099,12 @@ const songStatus = $("songStatus");
 
 // ---- Effects + visuals side panel ----------------------------------------------------------
 $("visChips").innerHTML = VIS_NAMES.map((v, i) =>
-  `<div class="fxchip" id="vis_${v}" style="cursor:pointer" data-vis="${v}"><b>${i + 1}</b><span style="flex:1">${VIS_LABELS[v]}</span></div>`).join("");
+  `<div class="fxchip" id="vis_${v}" style="cursor:pointer" data-vis="${v}" role="button" tabindex="0"><b>${i + 1}</b><span style="flex:1">${VIS_LABELS[v]}</span></div>`).join("");
 $("visChips").addEventListener("click", (e) => { const c = e.target.closest("[data-vis]"); if (c) setVisual(c.dataset.vis); });
+$("visChips").addEventListener("keydown", (e) => {
+  const c = e.target.closest?.("[data-vis]");
+  if (c && (e.key === "Enter" || e.key === " ")) { e.preventDefault(); setVisual(c.dataset.vis); }
+});
 $("fxChips").innerHTML = FX_NAMES.map((f, i) =>
   `<div class="fxchip" id="fx_${f}"><b>${i + 1}</b><span style="flex:1">${FX_LABELS[f]}</span><div class="fxbar"><div></div></div></div>`).join("") +
   `<div class="fxchip"><b>5</b><span style="flex:1">Open hand = all off</span></div>`;
@@ -2103,7 +2130,7 @@ const upNext = createUpNext(queue);
 $("songQueue").insertBefore(upNext.element, $("queueMount"));
 window.airdeck.queue = queue;   // for debugging and tests, like airdeck.deck
 
-// The AI DJ moved to its own page; old index.html#ai-dj links go there.
+// The AI DJ is now AirMix (ai-dj.html); old index.html#ai-dj links go there.
 if (location.hash === "#ai-dj") location.replace("ai-dj.html");
 
 // Keep the song card's count and status line in step with the queue.

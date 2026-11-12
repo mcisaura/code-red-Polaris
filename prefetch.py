@@ -8,6 +8,7 @@ copied over; the rest are downloaded with the same downloader as server.py.
 """
 
 import json
+import os
 import shutil
 import sys
 from pathlib import Path
@@ -15,6 +16,18 @@ from pathlib import Path
 import server
 
 MUSIC = server.ROOT / "music"
+
+
+def install(source, target):
+    """Copy source to target in one step, so an interrupted copy never leaves a truncated target."""
+    temp = target.with_name(target.name + ".part")
+    try:
+        # Saved as .m4a whatever the container: browsers detect the format from the data.
+        shutil.copyfile(source, temp)
+        os.replace(temp, target)
+    except BaseException:
+        temp.unlink(missing_ok=True)
+        raise
 
 
 def main():
@@ -39,8 +52,12 @@ def main():
                 failed += 1
                 continue
             earlier = server.ROOT / entry["file"]
-        # Saved as .m4a whatever the container: browsers detect the format from the data.
-        shutil.copyfile(earlier, target)
+        try:
+            install(earlier, target)
+        except OSError as error:
+            print(f"{label}: FAILED ({error})")
+            failed += 1
+            continue
         print(f"{label}: ready")
     print(f"\n{len(library) - failed} of {len(library)} songs ready in music/.")
     sys.exit(1 if failed else 0)

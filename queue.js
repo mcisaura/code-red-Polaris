@@ -164,7 +164,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     const entry = { id: nextId++, ...item };
     items = [...items, entry];
     changed();
-    if (autoplay && currentId === null && !playsPending) queue.play(entry.id);
+    // Not while a song is playing (removing the playing song clears currentId but it keeps playing).
+    if (autoplay && currentId === null && !playsPending && !deck.playing) queue.play(entry.id);
     return entry;
   }
 
@@ -196,7 +197,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     if (!frequencyHeld) setDeckFrequency(hz);
   };
   deck.setVolume = (volume) => {
-    if (volumeHeld) return;
+    if (volumeHeld || !Number.isFinite(volume)) return;
     handVolume = volume;
     setDeckVolume(volume * duckLevel);
   };
@@ -486,7 +487,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       const { picks } = await postJson("/dj/pick", {
         vibe: dj.vibe,
         nowPlaying: current?.title ?? "",
-        queued: items.map((item) => item.title),
+        queued: items.slice(Math.max(0, currentIndex())).map((item) => item.title), // current and upcoming, not played ones
         crowd: dj.crowd,
         played,
         count: djPicksPerRequest,
@@ -543,7 +544,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   const coached = () => performance.now() - coachSeen < 4000; // a hiccup (a song decoding) mustn't hand a mix to the AI
   setInterval(() => {
     if (!dj.on || transitioning || !deck.playing || !deck.buffer) return;
-    const next = upcoming()[0];
+    // A song that failed to load isn't retried here every tick; the next one that hasn't failed is used.
+    const next = upcoming().find((item) => !loadFailed.has(item.id));
     if (!next) return;
     if (!coached() && position() >= transitions.mixPoint(deck.buffer, dj.short)) {
       transitionTo(next, { mixOutAt: transitions.mixOutPoint(deck.buffer, dj.short) });
@@ -769,7 +771,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
     // Jumps to a point in the current song (seconds).
     seek(seconds) {
-      if (!deck.buffer) return;
+      if (!deck.buffer || !Number.isFinite(seconds)) return;
       cancelEnding();
       cancelTransition();
       cancelRequest();
@@ -1455,7 +1457,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   const libraryCount = element("span", { text: "Library" });
   let libraryKey = "";
   const fileInput = element("input", { type: "file", accept: "audio/*,video/mp4" });
-  const status = element("p", { className: "queuePanel-status", hidden: "" });
+  const status = element("p", { className: "queuePanel-status", role: "status", "aria-live": "polite", hidden: "" });
   const vibeInput = element("input", { type: "text", placeholder: "DJ vibe, e.g. chill house into hype EDM", "aria-label": "DJ vibe" });
   const djButtons = element("span", { className: "queuePanel-actions" });
   const djRow = element("div", { className: "queuePanel-dj" }, [
@@ -1463,7 +1465,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     vibeInput,
     djButtons,
   ]);
-  const djStatus = element("p", { className: "queuePanel-status", hidden: "" });
+  const djStatus = element("p", { className: "queuePanel-status", role: "status", "aria-live": "polite", hidden: "" });
   const shortToggle = element("input", {
     type: "checkbox",
     onChange: () => queue.setShortMixes(shortToggle.checked),
@@ -1599,7 +1601,8 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     setDropIndex(dropIndexAt(mids, event.clientY));
   }
 
-  function drop(items) {
+  function drop() {
+    const items = queue.getState().items; // live: the rendered list may be stale by drop time
     const movedId = draggedId;
     const target = dropIndex;
     // End the drag first, so the list redraws when the move fires a change.
@@ -1607,6 +1610,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     setDropIndex(null);
     if (movedId === null || target === null) return;
     const from = items.findIndex((item) => item.id === movedId);
+    if (from === -1) return; // removed meanwhile
     // Taking the row out first shifts everything after it up by one.
     queue.move(movedId, moveTarget(from, target));
   }
@@ -1616,7 +1620,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     const isLoading = item.id === state.loadingId;
     const classes = ["queuePanel-row", isCurrent && "current", item.dj && "fromDj"].filter(Boolean).join(" ");
     const handle = element("span", { className: "queuePanel-handle", title: "Drag to reorder", "aria-hidden": "true", text: "⋮⋮" });
-    const entry = element("li", { className: classes, tabindex: "0", "data-id": String(item.id), "aria-keyshortcuts": "Alt+ArrowUp Alt+ArrowDown" }, [
+    const entry = element("li", { className: classes, tabindex: "0", "aria-label": `${index + 1} of ${state.items.length}: ${item.title}`, "data-id": String(item.id), "aria-keyshortcuts": "Alt+ArrowUp Alt+ArrowDown" }, [
       handle,
       element("span", { className: "queuePanel-number", text: String(index + 1) }),
       element("div", { className: "queuePanel-track" }, [
@@ -1665,7 +1669,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
       entry.classList.remove("dragging");
       if (draggedId === null) return;
       if (commit) {
-        drop(state.items);
+        drop();
       } else {
         draggedId = null;
         setDropIndex(null);

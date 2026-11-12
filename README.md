@@ -29,7 +29,7 @@ Keyboard test keys (no camera needed): `S` song mode, `←→` blend, `Enter` fi
 
 ### Arcade · 2P
 
-`arcade-versus.html`: two players, one camera. P1 plays with the left half of the frame, P2 with the right half; each side panel shows that player's half of the camera with their hand drawn on it. Pick a game with the arrows in the top bar. The top bar's switch goes to the DJ Deck, and its **♪ AirMix** button (next to Arcade) to the one-player game. Background music is a short chiptune made with Web Audio (no audio files).
+`arcade-versus.html`: two players, one camera. P1 plays with the left half of the frame, P2 with the right half; each side panel shows that player's half of the camera with their hand drawn on it. Pick a game with the arrows in the top bar. The top bar's switch goes to the DJ Deck, and its **♪ AirMix** button (next to Arcade) to the one-player game. Its **✦ Club** button opens the 3D Club demo (`club.html`). The top bar also has **Pause**, **Restart** and **Music** buttons, and the game pauses by itself when the tab is hidden. Background music is a short chiptune made with Web Audio (no audio files).
 
 | Game | How you play | How you win |
 |---|---|---|
@@ -89,13 +89,12 @@ the mix when the genre switches (and at the start of the set):
 - **Echo out** when they're far apart (or a song's tempo can't be detected reliably): the current song echoes out and
   the next one fades in under the echoes.
 
-Tempo and downbeats are detected from the audio (`analyzeTempo` in `mix-audio.js`, within 0.1 BPM on the synthetic
+Tempo and downbeats are detected from the audio (`analyzeTempo` in `mix-audio.js`, within 1 BPM on the synthetic
 beats in `tests/tempo-accuracy.cjs`) and checked against the library's BPM. The browser console logs each mix.
 
 **Short mixes** (on by default, a checkbox under the DJ) bring each song in where it first gets going (skipping a
 quiet intro) and mix it out after about 20 s, in whole phrases, with shorter blends: a one-minute demo hears several
-transitions. The AI DJ page shows what's up next, when the DJ mixes into it and
-how (blend or echo out); DJ Deck shows Up next in its sidebar.
+transitions. DJ Deck shows Up next in its sidebar: the next song, and when the DJ mixes into it and how (blend or echo out).
 
 ### AirMix
 
@@ -171,9 +170,11 @@ load elsewhere but the API answers 403, because it only accepts its own names in
 - `djStart.js`: AirMix's screens: pick your set, how to play, camera and hand check, loading, 3-2-1, results
 - `server.py`: local server; serves the site, downloads YouTube audio via yt-dlp into `downloads/`, and picks the AI DJ's songs from the library (offline)
 - `library.json`, `prefetch.py`: the song library and a script that fills `music/` with it
-- `tests/`: regression tests, no browser or camera needed. Run them all with
-  `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done` and `python3 tests/server-static.py`,
+- `tests/`: regression tests, no browser or camera needed. Run them all with `bash tests/run.sh` (every
+  `tests/*.cjs` with node, then every `tests/server-*.py` with python3; it prints `FAIL` lines and exits non-zero on any failure).
+  By hand: `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done` and `python3 tests/server-static.py`,
   `python3 tests/server-requests.py`
+- `.github/workflows/tests.yml`: CI, which runs `bash tests/run.sh` on every push and pull request
 - `FEATURES_PLAN.md`: historical implementation plan
 - `AGENTS.md`: current guidance for coding agents
 
@@ -182,6 +183,8 @@ Tuning values (pinch range, smoothing, speed/filter ranges) are at the top of th
 ## Archived two-deck implementation
 
 `index.html` is now DJ Deck. `mix.html` redirects there; the former two-deck source remains in Git history. The notes below describe that former implementation.
+
+**These steps cannot be followed today:** `mix.html` only redirects to `index.html`, so the steps below describe the old version in Git history.
 
 Open http://localhost:8000/mix.html. Each deck has an on-screen **volume fader** and **filter knob** (deck A on the left, deck B on the right). Both decks are beat-synced to deck A's tempo (detected automatically).
 

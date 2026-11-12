@@ -33,8 +33,9 @@
 - `landing.html` / `landing.js`: the homepage; `club.html` / `club.js`: the preserved 3D Club demo; `aero.css`: shared Aero styling.
 - `server.py`: local serving/downloads and the offline AI DJ song picker (`/api/dj/pick`); Gemini and ElevenLabs were removed (restore from git history); loads a gitignored `.env` at startup.
 - `FEATURES_PLAN.md` is historical, not the current product specification.
+- The server only serves site assets: `.md`, `.py`, `.cjs`, `.example`, anything under `tests/` and `downloads/index.json` return 404, as do dotfiles and directory listings. CI runs `bash tests/run.sh` (`.github/workflows/tests.yml`).
 
-Run the regression suites (all are fast): `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done`, then `python3 tests/server-static.py` and `python3 tests/server-requests.py`; run `git diff --check`. Changes to `analyzeTempo` must keep `tests/tempo-accuracy.cjs` (35 synthetic tempos, ±1 BPM) and `tests/tempo-silence.cjs` passing. Browser checks matter for rendering and fullscreen. Stub tests do not replace real webcam/listening validation.
+Run the regression suites (all are fast): `bash tests/run.sh` (every `tests/*.cjs` with node, then every `tests/server-*.py` with python3), or by hand: `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done`, then `python3 tests/server-static.py` and `python3 tests/server-requests.py`; run `git diff --check`. Changes to `analyzeTempo` must keep `tests/tempo-accuracy.cjs` (35 synthetic tempos, ±1 BPM) and `tests/tempo-silence.cjs` passing. Browser checks matter for rendering and fullscreen. Stub tests do not replace real webcam/listening validation.
 
 AirMix may select uncached library songs; they download on Play. Loading failures must show retry/new-set controls. The server must never serve dotfiles (including `.env` and `.git`) or directory listings.
 

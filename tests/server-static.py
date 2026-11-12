@@ -21,6 +21,17 @@ with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() a
     (server.ROOT / "landing.html").write_text("public-home")
     (server.ROOT / "asset.js").write_text("public-asset")
     (server.ROOT / "assets").mkdir()
+    # Source and project files that are not site assets, next to ones that are.
+    for name in ("README.md", "server.py", "t.cjs", "x.env.example", "UPPER.MD"):
+        (server.ROOT / name).write_text("private-source")
+    (server.ROOT / "tests").mkdir()
+    (server.ROOT / "tests" / "a.js").write_text("private-source")
+    (server.ROOT / "downloads").mkdir()
+    (server.ROOT / "downloads" / "index.json").write_text("{}")
+    (server.ROOT / "downloads" / "s.m4a").write_text("public-media")
+    (server.ROOT / "library.json").write_text("{}")
+    (server.ROOT / "style.css").write_text("public-asset")
+    (server.ROOT / "page.html").write_text("public-asset")
     # Links to private files, inside the site and outside it.
     (Path(outside) / "secret.txt").write_text("private-fixture")
     (server.ROOT / "link-env.js").symlink_to(server.ROOT / ".env")
@@ -34,18 +45,21 @@ with tempfile.TemporaryDirectory() as temporary, tempfile.TemporaryDirectory() a
     try:
         blocked = ["/.env", "/%2eenv", "/.env?cache=1", "/.git/config", "/%2egit/config", "/assets/",
                    "/c://.env", "/c:/.env", "/c:.env", "/%00", "/asset.js%00", "//[x",
-                   "/link-env.js", "/link-git/config", "/link-outside.txt"]
+                   "/link-env.js", "/link-git/config", "/link-outside.txt",
+                   "/README.md", "/server.py", "/SERVER.PY", "/t.cjs", "/x.env.example", "/UPPER.MD",
+                   "/tests/a.js", "/Tests/a.js", "/downloads/index.json", "/downloads/../server.py"]
         for method in ("GET", "HEAD"):
             for path in blocked:
                 try:
                     urllib.request.urlopen(urllib.request.Request(base + path, method=method)).close()
                     raise AssertionError(f"{method} {path} should be blocked")
                 except urllib.error.HTTPError as error:
+                    error.close()
                     assert error.code == 404, (path, error.code)
-            for path in ("/", "/asset.js"):
+            for path in ("/", "/asset.js", "/library.json", "/style.css", "/page.html", "/downloads/s.m4a"):
                 with urllib.request.urlopen(urllib.request.Request(base + path, method=method)) as response:
                     assert response.status == 200
-        print("PASS: GET/HEAD hide configuration, Git metadata, symlinks to them, NUL and malformed paths and directory listings; public assets still serve")
+        print("PASS: GET/HEAD hide configuration, Git metadata, symlinks to them, NUL and malformed paths and directory listings; public assets still serve; source, tests/ and the download index are 404")
     finally:
         http.shutdown()
         http.server_close()
@@ -73,3 +87,7 @@ with tempfile.TemporaryDirectory() as folder:
         os.environ.pop("AIRDECK_TEST_BOM", None)
         os.environ.pop("AIRDECK_TEST_OTHER", None)
 print("PASS: .env loads with a byte-order mark; non-UTF-8 files and folders are skipped with a warning")
+
+# A stalled request can't hold a thread forever.
+assert server.Handler.timeout == 30
+print("PASS: the handler has a socket timeout")

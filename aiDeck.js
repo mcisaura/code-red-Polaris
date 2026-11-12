@@ -1,5 +1,5 @@
-// The AI DJ's deck (ai-dj.html): a frozen copy of audio.js, the hand tracker's
-// one-song deck, so changes to audio.js can't break the AI DJ's mixing
+// AirMix's deck (ai-dj.html): a frozen copy of audio.js, the hand tracker's
+// one-song deck, so changes to audio.js can't break AirMix's mixing
 // (transitions.js and queue.js use this class's fields).
 //
 // AirDeck audio engine: one looping track with speed, filter frequency and volume.
