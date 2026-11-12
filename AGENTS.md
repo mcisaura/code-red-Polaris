@@ -28,6 +28,7 @@
 - `queue.js`: shared queue, playback requests, embedded/floating panels, announcements.
 - `transitions.js`: manual level blends and automatic tempo/echo transitions.
 - `mix-audio.js`: `analyzeTempo` (tempo and downbeat detection used by `transitions.js`); otherwise the archived two-deck engine.
+- `deckTour.js`: DJ Deck first-visit tutorial (`createDeckTour` step logic plus a small card renderer); `tests/deck-tour.cjs`.
 - `frame.js`: polygon WebGL visuals; `bubble-particles.js`: screen-space particles.
 - `djGame.js` / `djStart.js`: AirMix gameplay, set selection, onboarding and results.
 - `arcade-versus.html`: two-player Arcade games.

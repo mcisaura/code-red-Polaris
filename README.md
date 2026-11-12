@@ -27,6 +27,8 @@ Songs come from the shared queue and library. DJ Deck keeps Song, Queue, Library
 
 Finger picks count the four fingers only: a thumb sticking out beside a point or a peace sign doesn't change the number. The thumb only matters with all four fingers up (open hand = 5).
 
+**Tutorial:** the first visit starts a short guided tutorial (`deckTour.js`) in the sidebar, above the Song card. Each of its 7 steps finishes when DJ Deck sees you do it (both hands, play a song, basic controls, an effect, next song, a visual, lock); **Show me** runs the step with the test keys' code, **Skip step** and **End tutorial** leave it, and the **Tutorial** button in the top bar replays it. Finishing or ending it stores `airdeck-tour-done` in localStorage.
+
 Keyboard test keys (no camera needed): `S` song mode, `←→` blend, `Enter` finish blend, `F` effects mode, `V` visuals mode, `1`–`5` pick, `↑↓` effect amount, `L` frame, `K` lock, `Esc` leave a mode.
 
 ### Arcade · 2P

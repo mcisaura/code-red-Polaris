@@ -156,6 +156,17 @@
   #deckWorkspace:is(:fullscreen, .expanded) aside { height: 100%; min-height: 0; overflow-y: auto; }
   #songQueue, aside > * { flex-shrink: 0; }
   .sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+  /* First-visit tutorial card (deckTour.js): lives in the sidebar, never over the camera */
+  .tourCard { display: flex; flex-direction: column; gap: 8px; color: #1b2a38; background: rgba(255,255,255,.92); }
+  .tourHead { display: flex; justify-content: space-between; align-items: center; gap: 8px; }
+  .tourCount { font-size: 12px; font-weight: 700; text-transform: uppercase; letter-spacing: .08em; color: #8a4510; }
+  .tourHint { font-size: 20px; }
+  .tourText { margin: 0; font-size: 14px; line-height: 1.4; }
+  .tourNice .tourText { font-weight: 700; color: #1f5c10; }
+  .tourButtons { display: flex; flex-wrap: wrap; gap: 6px; }
+  .tourButtons button { min-height: 32px; padding: 0 12px; font-size: 13px; }
+  .tour-highlight { outline: 3px solid rgba(245,134,31,.85); outline-offset: 3px; border-radius: 14px; transition: outline-color .3s; }
+  @media (prefers-reduced-motion: reduce) { .tour-highlight { transition: none; } .tourCard, .tourCard * { animation: none !important; transition: none !important; } }
   @media (max-width: 900px) {
     #deckWorkspace:is(:fullscreen, .expanded) { grid-template-columns: 1fr; grid-template-rows: minmax(0, 1fr) auto; }
     #deckWorkspace:is(:fullscreen, .expanded) aside { height: auto; max-height: 34vh; }
@@ -169,6 +180,7 @@
   <a class="brand" href="landing.html" title="Back to the home page"><svg width="34" height="34" viewBox="0 0 36 36" aria-hidden="true"><defs><radialGradient id="lg" cx="35%" cy="30%" r="75%"><stop offset="0" stop-color="#ffffff"/><stop offset="0.2" stop-color="#9be0ff"/><stop offset="0.75" stop-color="#1e95e3"/><stop offset="1" stop-color="#0b62b0"/></radialGradient></defs><circle cx="18" cy="18" r="17" fill="url(#lg)"/><path d="M7 20c3-6 6 6 9 0s6 6 9 0 4 2 4 2" fill="none" stroke="#fff" stroke-width="2.6" stroke-linecap="round"/><ellipse cx="13" cy="10" rx="6" ry="3.4" fill="#fff" opacity="0.75" transform="rotate(-25 13 10)"/></svg>AirDeck</a>
   <nav class="modes" aria-label="Modes"><a class="dj" href="index.html" aria-current="page">DJ Deck</a><a class="arcade" href="arcade-versus.html">Arcade</a></nav>
   <button id="start" disabled>Loading model…</button>
+  <button id="tourBtn" class="secondary" type="button">Tutorial</button>
   <span class="note" id="calibMsg"></span>
   <span class="status" id="status" role="status" aria-live="polite"></span>
 </header>
@@ -182,6 +194,7 @@
   </div>
 
   <aside>
+    <div id="tourMount" hidden></div>
     <div class="card glass songQueue" id="songQueue">
     <div class="song" id="songCard">
       <h2><span>Song</span><span class="queueBadge">Queue <span id="queueCount">0</span></span></h2>
@@ -228,6 +241,7 @@
 import { Deck } from "./audio.js?v=8";
 import { FrameFx } from "./frame.js?v=8";
 import { BubbleParticles } from "./bubble-particles.js";
+import { createDeckTour } from "./deckTour.js";
 import { createQueue, createQueuePanel, createTransport, createUpNext } from "./queue.js?v=4";
 
 const MEDIAPIPE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
@@ -1122,12 +1136,15 @@ function previousSong() {
 
 let defaultQueueStarting = false;
 
+// Choice counters read by the tutorial (deckTour.js); they only ever go up.
+const tourPicks = { fx: 0, song: 0, vis: 0 };
 // Choose song action / visual / effect number n (1–5) in the current mode.
 function pick(n) {
   deck.ensureContext();
   if (modes.current === "song") {
     const c = songChoice(n);
     if (c < 3 && defaultQueueStarting) return;
+    if (c === 1) tourPicks.song++;
     if (!queue.getState().items.length && c < 3) {
       defaultQueueStarting = true;
       flash("Loading the default queue…", 10000);
@@ -1141,12 +1158,13 @@ function pick(n) {
     else if (c === 2) { previousSong(); flash("⏮ Previous song"); }
   } else if (modes.current === "vis") {
     setVisual(VIS_NAMES[n - 1]);
+    if (VIS_NAMES[n - 1] !== "off") tourPicks.vis++;
     flash(VIS_NAMES[n - 1] === "off" ? "Visuals off" : `✨ ${VIS_LABELS[VIS_NAMES[n - 1]]}`);
   } else if (modes.current === "fx") {
     if (n === 5) { deck.clearEffects?.(); lastFx = null; flash("All effects off"); return; }
     const name = FX_NAMES[n - 1];
     const on = deck.toggleEffect?.(name);
-    if (on) lastFx = name;
+    if (on) { lastFx = name; tourPicks.fx++; }
     else if (lastFx === name) lastFx = FX_NAMES.find((f) => deck.effectState?.()[f]?.on) || null;
     flash(`${FX_LABELS[name]} ${on ? "on" : "off"}`);
   }
@@ -2160,6 +2178,38 @@ queue.on(updateSongCard);
 
 calibBtn.addEventListener("click", calibrate);
 updateControls();
+
+// ---- First-visit tutorial (deckTour.js) ---------------------------------------------
+// Reads existing state only; "Show me" calls the same functions the S / F / V / K test keys use.
+if (typeof createDeckTour === "function") {
+  const tourStorage = {
+    getItem: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
+    setItem: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
+  };
+  const demo = (mode) => () => { enterMode(mode, true); pick(1); enterMode("normal"); };
+  const tour = createDeckTour({
+    mount: $("tourMount"),
+    storage: tourStorage,
+    getState: () => {
+      const t = performance.now();
+      return {
+        bothHands: t - sides.left.lastSeen < HOLD_MS && t - sides.right.lastSeen < HOLD_MS,
+        playing: !!deck.playing,
+        locked: lock.locked,
+        speed: controls.speed, freq: controls.freq, volume: controls.volume,
+        mode: modes.current,
+        picks: { ...tourPicks },
+      };
+    },
+    actions: {
+      fx: demo("fx"), song: demo("song"), vis: demo("vis"),
+      lock: () => { if (!lock.locked) { lock.locked = true; flash("Controls locked"); } },
+    },
+  });
+  $("tourBtn").addEventListener("click", () => tour.replay());
+  setInterval(() => tour.tick(), 150);
+  tour.init();
+}
 
 Object.assign(window.airdeck, { modes, frame, FX_NAMES, lock, controls, blend, update, canvas, trackingDebug, sides });
 
