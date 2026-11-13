@@ -130,6 +130,28 @@
     #ytCard.ytCard { right: 12px; left: 12px; bottom: 12px; margin: 0 auto; }
     body.yt-on { padding-bottom: 300px; }
   }
+  /* Hosted audio: the same bottom-right glass card, with a live analyser preview instead of the video.
+     Shown by landing.js whenever the hosted-audio mode is active (playing, paused or blocked); never together with #ytCard. */
+  #hostCard { position: fixed; right: 16px; bottom: 16px; z-index: 40; width: 224px; max-width: calc(100vw - 24px); box-sizing: border-box; padding: 10px; display: flex; flex-direction: column; gap: 6px; border-radius: 22px; }
+  #hostCard[hidden], #hostCard [hidden] { display: none !important; }
+  #hostCard .np-title { margin: 0; font-size: 13px; font-weight: 800; text-transform: uppercase; letter-spacing: .08em; color: #8a4510; }
+  #hostCard #hostTrack { margin: 0; font-size: 13px; font-weight: 700; line-height: 1.3; color: #0b2f52; overflow-wrap: anywhere; }
+  #hostCard #hostArtist { margin: 0; font-size: 12px; line-height: 1.3; color: #0d3557; overflow-wrap: anywhere; }
+  #hostCard .host-stage { position: relative; width: 204px; max-width: 100%; margin: 0 auto; border-radius: 14px; overflow: hidden; line-height: 0; box-shadow: inset 0 0 0 1px rgba(255,255,255,.8), 0 2px 8px rgba(18,92,160,.18); }
+  #hostCard #hostViz { display: block; width: 100%; height: auto; aspect-ratio: 5 / 3; }
+  #hostCard #hostStart { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); min-height: 48px; padding: 0 18px; font-size: 17px; white-space: nowrap; }
+  #hostCard #hostNote { margin: 0; font-size: 12px; font-weight: 700; line-height: 1.3; color: #0d3557; text-align: center; }
+  #hostCard .host-prog { display: flex; align-items: center; gap: 8px; }
+  #hostCard #hostBar { flex: 1; height: 4px; border-radius: 99px; background: rgba(30,149,227,.25); overflow: hidden; }
+  #hostCard #hostFill { height: 100%; width: 0; background: linear-gradient(90deg, #1e95e3, #62b92e); }
+  #hostCard #hostTime { font-size: 11px; font-weight: 700; color: #0d3557; font-variant-numeric: tabular-nums; white-space: nowrap; }
+  #hostCard .host-ctl { display: flex; justify-content: center; gap: 10px; }
+  #hostCard .host-ctl button { width: 36px; height: 36px; min-height: 36px; padding: 0; }
+  #hostCard .host-ctl svg { width: 16px; height: 16px; }
+  @media (max-width: 600px) {
+    #hostCard { right: 12px; left: 12px; bottom: 12px; margin: 0 auto; }
+    body.host-on { padding-bottom: 300px; }
+  }
   a[aria-disabled="true"] { opacity: .6; cursor: not-allowed; }
 </style>
 </head>
@@ -138,6 +160,30 @@
 <aside id="ytCard" class="glass" aria-label="Now playing" hidden>
   <h2 class="np-title">Now playing</h2>
   <p id="npTrack" aria-live="polite"></p>
+</aside>
+
+<aside id="hostCard" class="glass" aria-label="Now playing" data-state="loading" hidden>
+  <h2 class="np-title">Now playing</h2>
+  <p id="hostTrack" aria-live="polite"></p>
+  <p id="hostArtist"></p>
+  <div class="host-stage">
+    <canvas id="hostViz" width="200" height="120" aria-hidden="true"></canvas>
+    <button class="lime" id="hostStart" type="button" hidden aria-label="Start music">&#9654; Start music</button>
+  </div>
+  <p id="hostNote" hidden>Your browser needs one click to start sound</p>
+  <div class="host-prog" id="hostProg" hidden>
+    <div id="hostBar" aria-hidden="true"><div id="hostFill"></div></div>
+    <span id="hostTime">0:00 / --:--</span>
+  </div>
+  <div class="host-ctl" id="hostControls">
+    <button class="lime" id="hostPlay" type="button" aria-label="Play music" aria-pressed="false">
+      <svg id="hostIconPause" hidden viewBox="0 0 24 24" aria-hidden="true"><rect x="6" y="5" width="4" height="14" rx="1.2" fill="currentColor"/><rect x="14" y="5" width="4" height="14" rx="1.2" fill="currentColor"/></svg>
+      <svg id="hostIconPlay" viewBox="0 0 24 24" aria-hidden="true"><path d="M8 5.5v13a1 1 0 0 0 1.5.86l10.2-6.5a1 1 0 0 0 0-1.72L9.5 4.64A1 1 0 0 0 8 5.5z" fill="currentColor"/></svg>
+    </button>
+    <button class="lime" id="hostSkip" type="button" hidden aria-label="Next song">
+      <svg viewBox="0 0 24 24" aria-hidden="true"><path d="M6 5.5v13a1 1 0 0 0 1.5.86l8.2-6.5a1 1 0 0 0 0-1.72L7.5 4.64A1 1 0 0 0 6 5.5z" fill="currentColor"/><rect x="16.5" y="5" width="3" height="14" rx="1.2" fill="currentColor"/></svg>
+    </button>
+  </div>
 </aside>
 
 <header class="hero" id="top">

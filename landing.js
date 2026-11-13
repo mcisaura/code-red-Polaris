@@ -119,7 +119,8 @@ class Landing {
     this.segs = [...document.querySelectorAll(".seg")];
     this.segs.forEach((b) => b.addEventListener("click", () => this.goTo(MODES.indexOf(b.dataset.mode) * STEP)));
     document.getElementById("play").addEventListener("click", () => this.togglePlay());
-    document.getElementById("skip").addEventListener("click", () => { if (this.useYt) { this.skipYt(); return; } this.ensureAudio(); this.actx.resume().catch(() => {}); this.autoplayPending = false; this.playing = true; this.playTrack(this.trackPos + 1); });
+    document.getElementById("skip").addEventListener("click", () => this.skipMusic());
+    this.bindCard();
     const previews = [...document.querySelectorAll("[data-preview]")];
     const updatePreview = () => {
       const active = previews.find((b) => b.matches(":hover") || b === document.activeElement);
@@ -507,7 +508,7 @@ class Landing {
     this.gestureArmed = true;
     this.gestureHandler = (e) => {
       if (!this.autoplayPending) { this.disarmGesture(); return; }
-      if (e.target?.closest?.("#play, #skip")) return;  // the buttons start playback themselves
+      if (e.target?.closest?.("#play, #skip, #hostCard button")) return;  // the buttons start playback themselves
       this.disarmGesture();
       this.startBackgroundMusic(true);
     };
@@ -629,9 +630,84 @@ class Landing {
     document.getElementById("playLabel").textContent = tr ? tr.title : this.src === "synth" ? "Built-in beat" : "Play music";
     document.getElementById("playSub").textContent = this.status || (tr ? tr.artist + (this.playing ? "" : " · paused") : "");
     document.getElementById("skip").hidden = !(this.src === "music" && tr);
+    this.renderCard();
     if (this.useYt) {
       const np = document.getElementById("npTrack");
       if (np) np.textContent = tr ? tr.title + " · " + tr.artist : "";
+    }
+  }
+
+  // ---- Hosted audio: the "Now playing" card (#hostCard, bottom right) ----------------
+  // Visible whenever the hosted-audio mode is on (playing, paused, blocked or failed), never with #ytCard.
+  // Its canvas draws the page's own analyser, only while music plays and the tab is visible.
+  skipMusic() {
+    if (this.useYt) { this.skipYt(); return; }
+    this.ensureAudio(); this.actx.resume().catch(() => {}); this.autoplayPending = false; this.playing = true; this.playTrack(this.trackPos + 1);
+  }
+  bindCard() {
+    const on = (id, fn) => document.getElementById(id)?.addEventListener?.("click", fn);
+    on("hostPlay", () => this.togglePlay());
+    on("hostSkip", () => this.skipMusic());
+    on("hostStart", () => { if (!this.playing) this.startBackgroundMusic(true); });
+    document.addEventListener?.("visibilitychange", () => this.syncCardLoop());
+  }
+  renderCard() {
+    const $ = (id) => document.getElementById(id), card = $("hostCard");
+    if (!card) return;
+    const show = this.hostedAudio === true && !this.useYt;
+    card.hidden = !show;
+    document.body.classList.toggle?.("host-on", show);
+    if (!show) { this.syncCardLoop(); return; }
+    const tr = this.track, blocked = this.status === "Click anywhere for quiet music", failed = !tr && this.status === "Songs could not be played";
+    const state = failed ? "error" : blocked ? "blocked" : !tr ? "loading" : this.playing ? "playing" : "paused";
+    const wasBlocked = card.attrs?.["data-state"] === "blocked" || card.getAttribute?.("data-state") === "blocked";
+    card.setAttribute("data-state", state);
+    $("hostTrack").textContent = failed ? "Songs could not be played" : tr ? tr.title : "Loading…";
+    $("hostArtist").textContent = tr ? tr.artist : "";
+    $("hostStart").hidden = !blocked; $("hostNote").hidden = !blocked;
+    $("hostProg").hidden = blocked || !tr; $("hostControls").hidden = blocked;
+    $("hostSkip").hidden = !tr;
+    const pl = $("hostPlay");
+    pl.setAttribute("aria-label", failed ? "Retry playing music" : this.playing ? "Pause music" : "Play music");
+    pl.setAttribute("aria-pressed", this.playing);
+    $("hostIconPlay").toggleAttribute("hidden", this.playing);
+    $("hostIconPause").toggleAttribute("hidden", !this.playing);
+    if (wasBlocked && !blocked && document.activeElement?.id === "hostStart") pl.focus?.();
+    this.syncCardLoop();
+  }
+  cardAnimating() { return this.hostedAudio === true && !this.useYt && this.playing && !document.hidden; }
+  // One loop at most: requestAnimationFrame normally, a slow timer for progress only under reduced motion.
+  syncCardLoop() {
+    if (!this.cardAnimating()) {
+      if (this.cardH != null) { this.rm ? (typeof clearTimeout === "function" && clearTimeout(this.cardH)) : (typeof cancelAnimationFrame === "function" && cancelAnimationFrame(this.cardH)); this.cardH = null; }
+      this.drawCard(false);
+      return;
+    }
+    if (this.cardH != null) return;
+    const next = this.rm ? (f) => setTimeout(f, 1000) : typeof requestAnimationFrame === "function" ? requestAnimationFrame : null;
+    if (!next) { this.drawCard(false); return; }
+    const step = () => { this.cardH = null; this.drawCard(!this.rm); if (this.cardAnimating()) this.cardH = next(step); };
+    step();
+  }
+  drawCard(live) {
+    const $ = (id) => document.getElementById(id), a = this.audio;
+    const cur = a && isFinite(a.currentTime) ? a.currentTime : 0, dur = a && isFinite(a.duration) && a.duration > 0 ? a.duration : 0;
+    const fmt = (s) => Math.floor(s / 60) + ":" + String(Math.floor(s % 60)).padStart(2, "0");
+    const time = $("hostTime"); if (time) time.textContent = fmt(cur) + " / " + (dur ? fmt(dur) : "--:--");
+    const fill = $("hostFill"); if (fill?.style) fill.style.width = (dur ? Math.min(100, cur / dur * 100) : 0) + "%";
+    const g = $("hostViz")?.getContext?.("2d"); if (!g) return;
+    const w = g.canvas.width, h = g.canvas.height, n = 24, gap = 3, bw = (w - gap * (n + 1)) / n;
+    const sky = g.createLinearGradient(0, 0, 0, h); sky.addColorStop(0, "#e4f5ff"); sky.addColorStop(1, "#8fd0f5");
+    g.fillStyle = sky; g.fillRect(0, 0, w, h);
+    const bars = g.createLinearGradient(0, 0, 0, h); bars.addColorStop(0, "#b7ec7a"); bars.addColorStop(0.5, "#4fc3f7"); bars.addColorStop(1, "#1e95e3");
+    const data = live && this.an && this.fbuf ? (this.an.getByteFrequencyData(this.fbuf), this.fbuf) : null;
+    for (let i = 0; i < n; i++) {
+      let v;
+      if (data) { const k = 1 + Math.floor(Math.pow(i / n, 1.6) * data.length * 0.6); v = Math.min(1, (data[k] || 0) / 255 * 1.15); }
+      else v = 0.2 + 0.45 * Math.abs(Math.sin(i * 0.7 + 1));  // static bars: paused, blocked or reduced motion
+      const bh = Math.max(4, v * (h - 14)), x = gap + i * (bw + gap), y = h - bh - 6;
+      g.fillStyle = bars; g.fillRect(x, y, bw, bh);
+      g.fillStyle = "rgba(255,255,255,.55)"; g.fillRect(x, y, bw, 2);
     }
   }
 
