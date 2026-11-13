@@ -16,7 +16,9 @@ for (const s of lib.songs) {
   assert(s.license && /^CC |^Public/.test(s.license), `${n}: license`);
   assert(/^https:\/\/creativecommons\.org\//.test(s.licenseUrl), `${n}: licenseUrl`);
   assert(typeof s.attribution === 'string' && s.attribution.includes(s.title) && s.attribution.includes(s.artist), `${n}: attribution names title and artist`);
-  if (s.license === 'CC BY 4.0') assert(/By Attribution 4\.0/.test(s.attribution) && s.attribution.includes('incompetech.com'), `${n}: CC BY attribution text`);
+  if (s.license === 'CC BY 4.0' && s.artist === 'Kevin MacLeod') assert(/By Attribution 4\.0/.test(s.attribution) && s.attribution.includes('incompetech.com'), `${n}: CC BY attribution text`);
+  assert(/^https:\/\/[^ ]+$/.test(s.source || ''), `${n}: source (page where the licence was verified)`);
+  assert(!/(^|[^A-Za-z])(NC|ND)([^A-Za-z]|$)/.test(s.license), `${n}: NC/ND licences are not allowed`);
   assert(s.hosted === undefined, `${n}: hosted is added by the build, not stored`);
   assert(s.beat, `${n}: beat (run node scripts/analyze-library.mjs --public)`);
   const b = s.beat;

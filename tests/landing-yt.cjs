@@ -1,4 +1,4 @@
-// Landing page music: hosted plays the playlist through the YouTube embed (never music/*.m4a); local is unchanged.
+// Landing page music: hosted WITHOUT hosted songs plays the playlist through the YouTube embed (never music/*.m4a); local is unchanged.
 const fs = require('fs'), vm = require('vm'), assert = require('assert');
 const code = fs.readFileSync(__dirname + '/../landing.js', 'utf8');
 const html = fs.readFileSync(__dirname + '/../landing.html', 'utf8');
@@ -28,10 +28,10 @@ function setup(config) {
     createMediaElementSource() { return { connect() {} }; } createDynamicsCompressor() { return { connect() { return this; } }; }
     createBuffer() { return { getChannelData: () => new Float32Array(4) }; } get destination() { return {}; } }
   const box = { console: { warn() {}, log() {} }, document: { getElementById: el, body: { classList: { add() {} } } }, performance: { now: () => 100000 }, Math, Audio: FakeAudio, AudioContext: FakeCtx, Uint8Array, Float32Array,
-    loadConfig: async () => config, createYtEmbed: () => embed, MUSIC_VOLUME: 0.12, BPM: 112,
+    loadConfig: async () => config, loadLibrary: async () => [], addEventListener() {}, removeEventListener() {}, setTimeout, createYtEmbed: () => embed, MUSIC_VOLUME: 0.12, BPM: 112,
     fetch: async (url, opts) => { fetched.push(String(url)); return { ok: false, status: 404, json: async () => null }; } };
   vm.createContext(box);
-  vm.runInContext(`${playlist}\nclass P { constructor() { this.playing = false; this.autoplayPending = true; this.src = 'music'; this.track = null; this.status = ''; this.trackPos = 0; this.loadToken = 0; this.fails = 0; this.bass = 0; this.order = PLAYLIST.map((_, i) => i); }\nstartSynth() {} stopSynth() {}\n${block}\n}\nglobalThis.P = P;`, box);
+  vm.runInContext(`${playlist}\nclass P { constructor() { this.playing = false; this.autoplayPending = true; this.src = 'music'; this.track = null; this.status = ''; this.trackPos = 0; this.loadToken = 0; this.fails = 0; this.bass = 0; this.list = PLAYLIST; this.order = PLAYLIST.map((_, i) => i); }\nstartSynth() {} stopSynth() {}\n${block}\n}\nglobalThis.P = P;`, box);
   const page = new box.P();
   page.rm = false;
   return { page, embed, fetched, els, audios, el };

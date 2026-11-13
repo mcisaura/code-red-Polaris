@@ -33,7 +33,9 @@ const HAND_GAIN = 7;           // radians of turn per full frame width of hand t
 // Landing page music, shuffled on every page load. Each song plays from
 // music/<id>.m4a when that file exists (fast, works on any static host);
 // otherwise server.py's /api/youtube downloads it once into downloads/. The hosted site has no audio
-// files: it plays the same ids through YouTube's own embedded player in the "Now playing" card.
+// files unless /library.json lists songs with hosted: true: those play from /music/<id>.m4a through the
+// same <audio> + analyser as local, starting at page load when the browser allows sound, else on the first
+// gesture. Without hosted songs it plays the same ids through YouTube's own embedded player in the "Now playing" card.
 // An entry may carry beat: { bpm, first } (or bpm) for the hosted pulse; the default is BPM.
 const PLAYLIST = [
   { title: "New Look (Wii U Mii Maker Lofi Mix)", artist: "Secret Potion", id: "NoWJIeNtFds" },
@@ -82,8 +84,8 @@ class Landing {
     // audio-driven
     this.kick = 0; this.bass = 0; this.beats = [];
     // music: a fresh random order every time the page opens
-    this.order = PLAYLIST.map((_, i) => i);
-    for (let i = this.order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [this.order[i], this.order[j]] = [this.order[j], this.order[i]]; }
+    this.list = PLAYLIST;
+    this.shuffleOrder();
     this.src = "music"; this.track = null; this.status = ""; this.trackPos = 0; this.loadToken = 0; this.fails = 0;
     this.eHist = []; this.prevE = 0; this.lastBeat = 0;
     this.ripples = []; this.bubs = []; this.bubT = 0;
@@ -126,7 +128,7 @@ class Landing {
     };
     previews.forEach((b) => ["pointerenter", "pointerleave", "focus", "blur"].forEach((event) => b.addEventListener(event, updatePreview)));
     const unlock = (e) => {
-      if (!this.autoplayPending || e.target.closest("#play, #skip")) return;
+      if (this.hostedAudio || !this.autoplayPending || e.target.closest("#play, #skip")) return;  // hosted audio has its own earliest-gesture listeners
       this.startBackgroundMusic(true);
     };
     document.addEventListener("pointerdown", unlock);
@@ -450,6 +452,8 @@ class Landing {
     this.an.connect(this.output); this.output.connect(A.destination);
     this.audio = new Audio(); this.audio.preload = "auto";
     this.audio.addEventListener("ended", () => this.playTrack(this.trackPos + 1));
+    this.audio.addEventListener("error", () => { if (this.hostedAudio && !this.loadingTrack) this.audioFailed("could not load " + this.track?.title); });  // not while a new src is pending: that error belongs to the old track
+    this.audio.addEventListener("playing", () => { if (this.hostedAudio) this.fails = 0; });
     A.createMediaElementSource(this.audio).connect(this.an);
     this.master = A.createGain(); this.master.gain.value = 0.5;
     this.master.connect(A.createDynamicsCompressor()).connect(this.an);
@@ -457,10 +461,23 @@ class Landing {
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     this.noiseBuf = nb;
   }
-  // Which player to use comes from /api/config: hosted sites stream through YouTube's embed.
+  shuffleOrder() {
+    this.order = this.list.map((_, i) => i);
+    for (let i = this.order.length - 1; i > 0; i--) { const j = Math.floor(Math.random() * (i + 1)); [this.order[i], this.order[j]] = [this.order[j], this.order[i]]; }
+  }
+  // Which player to use comes from /api/config and /library.json. Hosted site with hosted songs: their own
+  // audio files, through the same <audio> + analyser as local. Hosted without any: YouTube's embed.
   initMusic() {
-    loadConfig().then((cfg) => {
-      this.useYt = cfg.hosted === true && cfg.youtubeEmbed === true;
+    loadConfig().then(async (cfg) => {
+      if (cfg.hosted === true) {
+        const songs = (await loadLibrary()).filter((song) => song && song.hosted === true && typeof song.id === "string" && /^[\w-]+$/.test(song.id));
+        if (songs.length) {
+          this.hostedAudio = true;
+          this.list = songs.map((song) => ({ title: String(song.title || song.id), artist: String(song.artist || ""), id: song.id, file: "/music/" + song.id + ".m4a" }));
+          this.shuffleOrder();
+        }
+      }
+      this.useYt = !this.hostedAudio && cfg.hosted === true && cfg.youtubeEmbed === true;
       this.cfgReady = true;
       this.startBackgroundMusic();
     });
@@ -481,8 +498,56 @@ class Landing {
   waitForMusicGesture() {
     this.playing = false; this.audio.pause(); this.autoplayPending = true;
     this.status = "Click anywhere for quiet music"; this.renderPlayer();
+    if (this.hostedAudio) this.armGesture();
+  }
+  // Hosted audio: the browser alone decides whether sound may start without a click. When it says no, the
+  // first real activation gesture anywhere (not a specific button) starts the music, exactly once.
+  armGesture() {
+    if (this.gestureArmed) return;
+    this.gestureArmed = true;
+    this.gestureHandler = (e) => {
+      if (!this.autoplayPending) { this.disarmGesture(); return; }
+      if (e.target?.closest?.("#play, #skip")) return;  // the buttons start playback themselves
+      this.disarmGesture();
+      this.startBackgroundMusic(true);
+    };
+    for (const type of ["pointerdown", "keydown", "touchend"]) addEventListener(type, this.gestureHandler, { capture: true });
+  }
+  disarmGesture() {
+    if (!this.gestureArmed) return;
+    this.gestureArmed = false;
+    for (const type of ["pointerdown", "keydown", "touchend"]) removeEventListener(type, this.gestureHandler, { capture: true });
+  }
+  // play() is called straight away (inside the gesture when there is one); the sound only counts as started
+  // once the AudioContext runs too, otherwise the track would play silently into a suspended graph.
+  async tryPlayHosted() {
+    const A = this.actx;
+    A.resume().catch(() => {});
+    try {
+      await this.audio.play();
+      if (A.state !== "running") await Promise.race([A.resume().catch(() => {}), new Promise((r) => setTimeout(r, 300))]);
+    } catch (err) {
+      if (err.name === "AbortError") return;  // a newer track replaced this one
+      if (err.name !== "NotAllowedError") { this.audioFailed(err.message); return; }
+    }
+    if (A.state === "running" && !this.audio.paused) {
+      this.autoplayPending = false; this.disarmGesture(); this.status = "";
+    } else this.waitForMusicGesture();
+    this.renderPlayer();
+  }
+  // A track that errors is skipped once per pass; after a full pass with nothing playing, stop.
+  audioFailed(message) {
+    if (this.failedToken === this.loadToken || !this.track) return;
+    this.failedToken = this.loadToken;
+    console.warn("[music]", this.track.title, message);
+    if (++this.fails < this.list.length) { this.playTrack(this.trackPos + 1); return; }
+    this.loadToken++; this.loadingTrack = false;
+    this.playing = false; this.fails = 0; this.track = null; this.status = "Songs could not be played";
+    this.audio.pause(); this.audio.removeAttribute("src");  // play tries again from the top
+    this.renderPlayer();
   }
   async tryPlayMusic() {
+    if (this.hostedAudio) return this.tryPlayHosted();
     if (this.actx.state !== "running") { this.waitForMusicGesture(); return; }
     try {
       await this.audio.play(); this.autoplayPending = false; this.status = "";
@@ -506,7 +571,7 @@ class Landing {
   // Ask the server for the song file (it downloads it the first time), then stream it.
   // A song that fails is skipped; with no server at all, fall back to the built-in beat.
   async playTrack(k) {
-    const n = PLAYLIST.length, tr = PLAYLIST[this.order[((k % n) + n) % n]], token = ++this.loadToken;
+    const n = this.list.length, tr = this.list[this.order[((k % n) + n) % n]], token = ++this.loadToken;
     this.loadingTrack = true;
     this.trackPos = k; this.track = tr; this.status = "Loading…"; this.renderPlayer();
     try {
@@ -515,18 +580,20 @@ class Landing {
       this.audio.src = file;
       this.loadingTrack = false; this.status = "";
       if (this.playing) await this.tryPlayMusic();
-      this.fails = 0; this.renderPlayer();
-      this.fetchTrack(PLAYLIST[this.order[(k + 1) % n]]).catch(() => {});  // get the next one ready
+      if (!this.hostedAudio) this.fails = 0;  // hosted: reset when the audio really plays
+      this.renderPlayer();
+      this.fetchTrack(this.list[this.order[(k + 1) % n]]).catch(() => {});  // get the next one ready
     } catch (err) {
       if (token !== this.loadToken) return;
       this.loadingTrack = false;
       console.warn("[music]", tr.title, err.message);
+      if (this.hostedAudio) return this.audioFailed(err.message);
       if (err.noServer || ++this.fails >= 3) return this.fallbackSynth();
       this.playTrack(k + 1);
     }
   }
   fetchTrack(tr) {
-    if (tr.file) return tr.file;
+    if (tr.file) return Promise.resolve(tr.file);  // hosted songs carry their /music/<id>.m4a
     const local = "music/" + tr.id + ".m4a";
     const p = fetch(local, { method: "HEAD" }).then((res) => res.ok ? local : this.downloadTrack(tr));
     p.catch(() => { if (tr.file === p) tr.file = null; });  // let a failed song be retried later
@@ -596,7 +663,7 @@ class Landing {
   }
   skipYt() { this.autoplayPending = false; this.playing = true; this.playTrackYt(this.trackPos + 1); }
   async playTrackYt(k) {
-    const n = PLAYLIST.length, tr = PLAYLIST[this.order[((k % n) + n) % n]], token = ++this.loadToken;
+    const n = this.list.length, tr = this.list[this.order[((k % n) + n) % n]], token = ++this.loadToken;
     this.trackPos = k; this.track = tr; this.status = "Loading…"; this.ytSince = performance.now(); this.beatIdx = null; this.ytReady = false;
     document.body.classList.add("yt-on");
     this.renderPlayer();
@@ -613,7 +680,7 @@ class Landing {
     if (!this.playing || this.failedToken === this.loadToken) return;
     this.failedToken = this.loadToken;
     console.warn("[music]", this.track?.title, message);
-    if (++this.fails < PLAYLIST.length) { this.playTrackYt(this.trackPos + 1); return; }
+    if (++this.fails < this.list.length) { this.playTrackYt(this.trackPos + 1); return; }
     this.playing = false; this.fails = 0; this.track = null; this.status = "Songs could not be played";  // play tries again from the top
     this.yt?.stop();
     this.renderPlayer();
@@ -902,12 +969,25 @@ class Landing {
   };
 }
 
+// /library.json songs, fetched once; [] when it cannot be read.
+let libraryPromise;
+function loadLibrary() {
+  libraryPromise ??= (async () => {
+    try {
+      const res = await fetch("/library.json");
+      if (!res.ok) return [];
+      const data = await res.json();
+      const songs = Array.isArray(data) ? data : data?.songs;
+      return Array.isArray(songs) ? songs : [];
+    } catch { return []; }
+  })();
+  return libraryPromise;
+}
+
 // Music credits (CC BY needs them): the attribution of every hosted song that has one. Hidden when there are none.
 (async () => {
   try {
-    const res = await fetch("/library.json");
-    if (!res.ok) return;
-    const credits = ((await res.json())?.songs ?? []).map((song) => song?.attribution).filter((text) => typeof text === "string" && text.trim());
+    const credits = (await loadLibrary()).map((song) => song?.attribution).filter((text) => typeof text === "string" && text.trim());
     if (!credits.length) return;
     const list = document.getElementById("creditList"), box = document.getElementById("credits");
     if (!list || !box) return;

@@ -196,8 +196,8 @@ on the Worker, `{ "youtube": true, "youtubeEmbed": false, "hosted": false }` fro
 (`worker/picker.js`, a port of the one in `server.py`), the library, pasted YouTube links, and adding an audio file from your computer.
 **What doesn't:** YouTube downloads (`/api/youtube` and `/api/progress` answer 501), so the queue panel hides the download box,
 and AirMix has no "↓ download" badges or `prefetch.py` hint. **Two libraries on the hosted site.** `library.json`'s songs (YouTube ids) play through the embedded YouTube player, like pasted
-links: no effects. `library.public.json` lists tracks the site is allowed to host (15 Kevin MacLeod tracks, Creative Commons
-Attribution 4.0); their audio lives in the gitignored `public-music/<id>.m4a`; `npm run build` copies those files to `dist/music/<id>.m4a`, and
+links: no effects. `library.public.json` lists tracks the site is allowed to host (15 EDM tracks under CC BY or CC BY-SA, each with
+the page where its licence is stated in `source`); their audio lives in the gitignored `public-music/<id>.m4a`; `npm run build` copies those files to `dist/music/<id>.m4a`, and
 Cloudflare serves them as free static assets at `/music/<id>.m4a` (each file under 25 MiB), so effects and beat-matched blends work on them. The build writes `dist/library.json` as `library.json`'s songs unchanged
 followed by `library.public.json`'s songs with `"hosted": true`. CC BY requires credit: each song's `attribution` text is listed
 under "Music credits" in the landing page footer. Rule: only audio you have the right to publish (CC BY, CC0, your own, or

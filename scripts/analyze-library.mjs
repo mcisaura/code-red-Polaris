@@ -7,7 +7,7 @@
 // half/double time) the measurement is not trusted (swung/triplet feel, wrong octave): no
 // `beat` is written for that song (any old one is removed) and it is listed instead.
 // With --public the same analysis runs on library.public.json against public-music/<id>.m4a.
-// There the listed `bpm` is incompetech.com's published tempo (the prior, not a trusted value); when the
+// There the listed `bpm` is the published or estimated tempo (the prior, not a trusted value); when the
 // measurement is trusted and within 2 BPM of it, `bpm` is replaced by the rounded measured tempo.
 // Not part of the hosted build.
 import { readFileSync, writeFileSync, existsSync } from "node:fs";
