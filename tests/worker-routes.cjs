@@ -177,8 +177,9 @@ const ORIGIN = 'https://airdeck.example.workers.dev';
   assert.strictEqual(calls.r2.length, r2Before, 'invalid ids never reach R2');
   assert.strictEqual((await call('/music/funkorama.m4a', {method: 'POST', body: 'x'})).status, 405);
   assert.strictEqual(calls.assets.length, before + 8, 'valid /music requests never touch ASSETS; bad ids fall through to it');
-  // Without the bucket bound the route is a clean 404.
-  const noBucket = await worker.fetch(new Request(ORIGIN + '/music/funkorama.m4a'), {ASSETS: env.ASSETS});
-  assert.strictEqual(noBucket.status, 404);
+  // Without the bucket bound the audio comes from the static assets.
+  const beforeAssets = calls.assets.length;
+  await worker.fetch(new Request(ORIGIN + '/music/funkorama.m4a'), {ASSETS: env.ASSETS});
+  assert.strictEqual(calls.assets.length, beforeAssets + 1, 'no bucket: /music falls through to ASSETS');
   console.log('PASS: Worker routes: pages, /api/config, picker with origin/body checks, 501/404 API routes, hosted audio from R2 (ranges, 416, 404, id validation)');
 })().catch((error) => { console.error(error); process.exitCode = 1; });

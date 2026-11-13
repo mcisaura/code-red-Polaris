@@ -1,10 +1,10 @@
 // Builds dist/: the public files of the AirDeck site, for Cloudflare Workers static assets.
 // Run: node scripts/build-site.mjs   (npm run build)
 // Only an allowlist of file types from the repo root plus easter/ is copied, so server code,
-// tests, docs, secrets, music and downloads can never end up on the hosted site.
+// tests, docs, secrets, music/ and downloads can never end up on the hosted site.
 // dist/library.json = library.json's songs unchanged (YouTube ids, played in YouTube's embedded player), then
-// library.public.json's songs each with "hosted": true (real audio at /music/<id>.m4a, served from R2 by the Worker).
-// Audio (music/, public-music/) is never copied into dist/.
+// library.public.json's songs each with "hosted": true (real audio at /music/<id>.m4a, copied from public-music/<id>.m4a).
+// Only those tracks' audio is copied into dist/music/; music/ (YouTube downloads) is never copied.
 import { cpSync, existsSync, mkdirSync, readdirSync, readFileSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { dirname, extname, join, relative } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -103,6 +103,15 @@ export function build() {
   const merged = mergeLibraries(Array.isArray(libraryData) ? { songs: libraryData } : libraryData, publicLibrary);
   writeFileSync(join(dist, "library.json"), JSON.stringify(merged, null, 2) + "\n");
   copied.push("library.json");
+  // The hosted tracks' audio (only the files library.public.json lists) ships as static assets at /music/<id>.m4a,
+  // so the site needs no R2 bucket. A missing file is skipped with a warning: that song 404s on the site.
+  for (const song of publicLibrary.songs) {
+    const source = join(root, "public-music", `${song.id}.m4a`);
+    if (!existsSync(source)) { console.warn(`build: public-music/${song.id}.m4a is missing`); continue; }
+    mkdirSync(join(dist, "music"), { recursive: true });
+    cpSync(source, join(dist, "music", `${song.id}.m4a`));
+    copied.push(`music/${song.id}.m4a`);
+  }
   return { copied, songs: songs.length, hosted: publicLibrary.songs.length };
 }
 

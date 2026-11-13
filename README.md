@@ -175,7 +175,7 @@ load elsewhere but the API answers 403, because it only accepts its own names in
 - `server.py`: local server; serves the site, downloads YouTube audio via yt-dlp into `downloads/`, and picks the AI DJ's songs from the library (offline)
 - `library.json`, `prefetch.py`: the song library and a script that fills `music/` with it
 - Cloudflare hosting: `wrangler.jsonc`, `worker/worker.js` (routes), `worker/picker.js` (the AI DJ picker in JavaScript),
-  `scripts/build-site.mjs` (builds `dist/`, merges `library.json` + `library.public.json`), `scripts/upload-music.mjs` (R2 upload), `library.public.json`, `package.json`
+  `scripts/build-site.mjs` (builds `dist/`, merges `library.json` + `library.public.json`), `scripts/upload-music.mjs` (optional R2 upload), `library.public.json`, `package.json`
 - `tests/`: regression tests, no browser or camera needed. Run them all with `bash tests/run.sh` (every
   `tests/*.cjs` with node, then every `tests/server-*.py` with python3; it prints `FAIL` lines and exits non-zero on any failure).
   By hand: `for t in tests/*.cjs; do node "$t" || echo "FAIL $t"; done` and `python3 tests/server-static.py`,
@@ -188,7 +188,7 @@ Tuning values (pinch range, smoothing, speed/filter ranges) are at the top of th
 
 ## Hosting on Cloudflare Workers
 
-The same branch also runs as a hosted site on Cloudflare Workers (static assets plus one R2 bucket for the hosted tracks). The
+The same branch also runs as a hosted site on Cloudflare Workers (static assets; the hosted tracks ship as static files, so no R2 bucket is needed). The
 local Python server works exactly as before; the pages ask `GET /api/config` once (`{ "youtube": false, "youtubeEmbed": true, "hosted": true }`
 on the Worker, `{ "youtube": true, "youtubeEmbed": false, "hosted": false }` from `server.py`) and adapt.
 
@@ -197,12 +197,13 @@ on the Worker, `{ "youtube": true, "youtubeEmbed": false, "hosted": false }` fro
 **What doesn't:** YouTube downloads (`/api/youtube` and `/api/progress` answer 501), so the queue panel hides the download box,
 and AirMix has no "↓ download" badges or `prefetch.py` hint. **Two libraries on the hosted site.** `library.json`'s songs (YouTube ids) play through the embedded YouTube player, like pasted
 links: no effects. `library.public.json` lists tracks the site is allowed to host (15 Kevin MacLeod tracks, Creative Commons
-Attribution 4.0); their audio lives in the R2 bucket `airdeck-music` and the Worker serves it at `/music/<id>.m4a` (GET/HEAD, byte
-ranges), so effects and beat-matched blends work on them. The build writes `dist/library.json` as `library.json`'s songs unchanged
+Attribution 4.0); their audio lives in the gitignored `public-music/<id>.m4a`; `npm run build` copies those files to `dist/music/<id>.m4a`, and
+Cloudflare serves them as free static assets at `/music/<id>.m4a` (each file under 25 MiB), so effects and beat-matched blends work on them. The build writes `dist/library.json` as `library.json`'s songs unchanged
 followed by `library.public.json`'s songs with `"hosted": true`. CC BY requires credit: each song's `attribution` text is listed
 under "Music credits" in the landing page footer. Rule: only audio you have the right to publish (CC BY, CC0, your own, or
-permission) goes in `library.public.json` and R2; never audio downloaded from the YouTube library. Local audio files live in
-`public-music/<id>.m4a` (gitignored; AAC 160k); measure beats with `node scripts/analyze-library.mjs --public`.
+permission) goes in `library.public.json`; never audio downloaded from the YouTube library. Local audio files live in
+`public-music/<id>.m4a` (gitignored; AAC 160k); measure beats with `node scripts/analyze-library.mjs --public`. A fresh clone must
+re-download these tracks before building: the build warns about each missing file, and that song 404s on the site (CI builds without them).
 
 **YouTube links on the hosted site (embed only).** The hosted site never downloads, proxies or decodes YouTube audio, and needs no
 API key. In the DJ Deck queue panel, "Paste a YouTube link" accepts `youtube.com/watch?v=`, `youtu.be/`, `/shorts/` and `/embed/`
@@ -220,19 +221,20 @@ Videos whose owners disable embedding (player errors 101/150), removed or privat
 
 Song ids are YouTube video ids. The build checks that each is 1-20 characters from `A-Z a-z 0-9 _ -`.
 
-One-time setup (needs a Cloudflare account):
+Deploy (needs a Cloudflare account, free plan, no payment card). Live site: https://airdeck.sankarpete.workers.dev
 
 ```sh
 npm install
 npx wrangler login
-npx wrangler r2 bucket create airdeck-music
-npm run upload-music          # public-music/*.m4a -> R2 (--dry-run to preview, --local for the `npm run dev` simulator)
-npm run deploy                # builds dist/ and runs wrangler deploy
+npm run deploy                # builds dist/ (copying the public-music/ tracks to dist/music/) and runs wrangler deploy
 ```
 
+Optional R2 route: create a bucket, run `npm run upload-music` (`--dry-run` to preview, `--local` for the `npm run dev` simulator),
+and bind it as `MUSIC` in `wrangler.jsonc`. The Worker uses R2 for `/music/` only when that binding exists.
+
 `npm run dev` builds and runs `wrangler dev`. `npm run build` just rebuilds `dist/`, which holds only the public site files (never
-`server.py`, `tests/`, docs, `.env*`, `music/` or `downloads/`), plus the merged `library.json`.
-`wrangler.jsonc` sets the Worker name `airdeck`, the `MUSIC` R2 binding (bucket `airdeck-music`) and the `ASSETS` binding (Worker runs first for every request, `html_handling`
+`server.py`, `tests/`, docs, `.env*`, `music/` or `downloads/`), plus the merged `library.json` and the hosted tracks' audio in `dist/music/`.
+`wrangler.jsonc` sets the Worker name `airdeck` and the `ASSETS` binding (the `MUSIC` R2 binding is shown commented out as an option) (Worker runs first for every request, `html_handling`
 `none` so `/index.html` stays `/index.html`).
 
 ## Archived two-deck implementation

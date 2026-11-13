@@ -38,10 +38,15 @@ const root = path.join(__dirname, '..');
   assert.strictEqual(readLibrary().songs.length, src.songs.length);
   assert.strictEqual(new Set(out.songs.map((song) => song.id)).size, out.songs.length, 'ids unique across both');
   assert(!all.includes('library.public.json'), 'library.public.json itself is not copied');
-  assert(!all.some((name) => name.startsWith('public-music') || name.endsWith('.m4a')), 'no audio in dist/');
+  // Audio: only the hosted tracks' files, at music/<id>.m4a (skipped when public-music/ is absent, e.g. in CI).
+  const audio = all.filter((name) => name.endsWith('.m4a'));
+  const allowed = new Set(pub.songs.map((song) => `music/${song.id}.m4a`));
+  for (const name of audio) assert(allowed.has(name), `unexpected audio ${name}`);
+  for (const song of pub.songs) assert.strictEqual(audio.includes(`music/${song.id}.m4a`), fs.existsSync(path.join(root, 'public-music', `${song.id}.m4a`)), song.id);
+  assert(!all.some((name) => name.startsWith('public-music')), 'public-music/ itself is not copied');
 
-  const forbidden = [/^server\.py$/, /^prefetch\.py$/, /^tests\//, /^\.env/, /(^|\/)\./, /\.md$/i, /^music\//, /^downloads\//, /^worker\//,
-    /^scripts\//, /^node_modules\//, /^package(-lock)?\.json$/, /^wrangler\.jsonc$/, /\.py$/, /\.cjs$/, /\.mjs$/, /\.example$/, /\.m4a$/];
+  const forbidden = [/^server\.py$/, /^prefetch\.py$/, /^tests\//, /^\.env/, /(^|\/)\./, /\.md$/i, /^downloads\//, /^worker\//,
+    /^scripts\//, /^node_modules\//, /^package(-lock)?\.json$/, /^wrangler\.jsonc$/, /\.py$/, /\.cjs$/, /\.mjs$/, /\.example$/];
   for (const name of all) for (const pattern of forbidden) assert(!pattern.test(name), `dist/ must not contain ${name}`);
   assert.strictEqual(all.filter((name) => name.endsWith('.json')).join(), 'library.json');
   assert.strictEqual(copied.length, all.length, 'the build lists every file it copied');

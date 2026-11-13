@@ -1,5 +1,5 @@
 // AirDeck on Cloudflare Workers: serves dist/ (static assets), the offline AI DJ picker and the hosted
-// tracks (library.public.json, CC BY etc.) from the R2 bucket bound as MUSIC at /music/<id>.m4a.
+// tracks (library.public.json, CC BY etc.) at /music/<id>.m4a: static files in dist/, or the R2 bucket bound as MUSIC when one is configured.
 // library.json's songs play through YouTube's embedded player and are never hosted. What the Worker can't
 // do (YouTube downloads) answers with a clear JSON error, and /api/config tells the pages which they're on.
 import { pick } from "./picker.js";
@@ -103,7 +103,7 @@ async function youtubeInfo(request, url) {
   return json(200, { title: data.title.trim().slice(0, 200), author }, { "Cache-Control": "public, max-age=86400" });
 }
 
-// Hosted audio: GET|HEAD /music/<id>.m4a from R2, with single-range support so browsers can seek.
+// Hosted audio: GET|HEAD /music/<id>.m4a from the optional MUSIC R2 binding (unbound: static assets), with single-range support so browsers can seek.
 const MUSIC_PATH = /^\/music\/([a-z0-9-]{1,20})\.m4a$/;
 const AUDIO_HEADERS = { "Content-Type": "audio/mp4", "Accept-Ranges": "bytes", "Cache-Control": "public, max-age=31536000, immutable" };
 
@@ -174,7 +174,8 @@ export default {
         return secured(json(405, { error: "method not allowed" }, { Allow: "GET, HEAD" }));
       }
       const track = MUSIC_PATH.exec(pathname);
-      if (track) return secured(await music(request, env, track[1]));
+      // With an R2 bucket bound (optional) the audio comes from it; otherwise from the static assets the build ships.
+      if (track && env.MUSIC) return secured(await music(request, env, track[1]));
       // The landing page is the home page (index.html is the hand tracker, ai-dj.html is AirMix).
       if (pathname === "/") url.pathname = "/landing.html";
       return secured(await env.ASSETS.fetch(new Request(url, request)));

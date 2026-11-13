@@ -12,8 +12,9 @@
     "run_worker_first": true,
     // Serve files exactly as named (/index.html stays /index.html, no redirects to clean URLs).
     "html_handling": "none"
-  },
-  // Hosted audio (library.public.json): create once with `npx wrangler r2 bucket create airdeck-music`,
-  // fill with `npm run upload-music`. The Worker serves /music/<id>.m4a from it.
-  "r2_buckets": [{ "binding": "MUSIC", "bucket_name": "airdeck-music" }]
+  }
+  // Hosted audio (library.public.json) ships as static assets (dist/music/, copied from public-music/ by the build),
+  // which is free and needs no card. Optional: to serve it from R2 instead, create a bucket
+  // (`npx wrangler r2 bucket create airdeck-music`), run `npm run upload-music`, and add:
+  // "r2_buckets": [{ "binding": "MUSIC", "bucket_name": "airdeck-music" }]
 }

@@ -1,4 +1,5 @@
-// Uploads the hosted tracks to the R2 bucket the Worker serves them from.
+// Optional: uploads the hosted tracks to the R2 bucket the Worker serves them from. Only needed for the R2 route;
+// by default the build ships them as static assets (dist/music/), so the site needs no bucket.
 // Run: npm run upload-music [-- --dry-run] [-- --local]
 // Every public-music/<id>.m4a for a song in library.public.json goes to airdeck-music/<id>.m4a.
 //   (default)  --remote: the real bucket (needs `npx wrangler login` and `npx wrangler r2 bucket create airdeck-music`)
