@@ -6,6 +6,9 @@
 // automatic cycling, or by hovering/focusing a launch button.
 // Everything is drawn with Canvas 2D; the clouds are generated from fBm noise.
 
+import { loadConfig } from "./queue.js";
+import { createYtEmbed } from "./ytEmbed.js";
+
 const TAU = Math.PI * 2;
 const AUTO_TURN_SPEED = TAU / 24; // all three forms every 24 seconds
 const MUSIC_VOLUME = 0.12;
@@ -29,7 +32,9 @@ const HAND_GAIN = 7;           // radians of turn per full frame width of hand t
 
 // Landing page music, shuffled on every page load. Each song plays from
 // music/<id>.m4a when that file exists (fast, works on any static host);
-// otherwise server.py's /api/youtube downloads it once into downloads/.
+// otherwise server.py's /api/youtube downloads it once into downloads/. The hosted site has no audio
+// files: it plays the same ids through YouTube's own embedded player in the "Now playing" card.
+// An entry may carry beat: { bpm, first } (or bpm) for the hosted pulse; the default is BPM.
 const PLAYLIST = [
   { title: "New Look (Wii U Mii Maker Lofi Mix)", artist: "Secret Potion", id: "NoWJIeNtFds" },
   { title: "Butterflies", artist: "Tsundere Twintails", id: "11dAGSfNvMI" },
@@ -89,7 +94,7 @@ class Landing {
     new ResizeObserver(() => this.resize()).observe(this.cv);
     this.resize();
     requestAnimationFrame(this.frame);
-    this.startBackgroundMusic();
+    this.initMusic();
   }
 
   // ---- UI wiring -------------------------------------------------------------
@@ -112,7 +117,7 @@ class Landing {
     this.segs = [...document.querySelectorAll(".seg")];
     this.segs.forEach((b) => b.addEventListener("click", () => this.goTo(MODES.indexOf(b.dataset.mode) * STEP)));
     document.getElementById("play").addEventListener("click", () => this.togglePlay());
-    document.getElementById("skip").addEventListener("click", () => { this.ensureAudio(); this.actx.resume().catch(() => {}); this.autoplayPending = false; this.playing = true; this.playTrack(this.trackPos + 1); });
+    document.getElementById("skip").addEventListener("click", () => { if (this.useYt) { this.skipYt(); return; } this.ensureAudio(); this.actx.resume().catch(() => {}); this.autoplayPending = false; this.playing = true; this.playTrack(this.trackPos + 1); });
     const previews = [...document.querySelectorAll("[data-preview]")];
     const updatePreview = () => {
       const active = previews.find((b) => b.matches(":hover") || b === document.activeElement);
@@ -122,7 +127,7 @@ class Landing {
     previews.forEach((b) => ["pointerenter", "pointerleave", "focus", "blur"].forEach((event) => b.addEventListener(event, updatePreview)));
     const unlock = (e) => {
       if (!this.autoplayPending || e.target.closest("#play, #skip")) return;
-      this.startBackgroundMusic();
+      this.startBackgroundMusic(true);
     };
     document.addEventListener("pointerdown", unlock);
     document.addEventListener("keydown", unlock);
@@ -452,7 +457,17 @@ class Landing {
     for (let i = 0; i < d.length; i++) d[i] = Math.random() * 2 - 1;
     this.noiseBuf = nb;
   }
-  startBackgroundMusic() {
+  // Which player to use comes from /api/config: hosted sites stream through YouTube's embed.
+  initMusic() {
+    loadConfig().then((cfg) => {
+      this.useYt = cfg.hosted === true && cfg.youtubeEmbed === true;
+      this.cfgReady = true;
+      this.startBackgroundMusic();
+    });
+  }
+  startBackgroundMusic(gesture = false) {
+    if (!this.cfgReady) { this.gesture ||= gesture; return; }  // config still loading; initMusic starts afterwards
+    if (this.useYt) { this.startYt(gesture || this.gesture); return; }
     this.ensureAudio();
     this.actx.resume().catch(() => {});
     this.playing = true;
@@ -479,6 +494,7 @@ class Landing {
   }
   togglePlay() {
     this.autoplayPending = false;
+    if (this.useYt) { this.toggleYt(); return; }
     this.ensureAudio(); this.actx.resume();
     this.playing = !this.playing;
     if (this.src === "synth") this.playing ? this.startSynth() : this.stopSynth();
@@ -512,7 +528,7 @@ class Landing {
   fetchTrack(tr) {
     if (tr.file) return tr.file;
     const local = "music/" + tr.id + ".m4a";
-    const p = fetch(local, { method: "HEAD" }).then((res) => (res.ok ? local : this.downloadTrack(tr)));
+    const p = fetch(local, { method: "HEAD" }).then((res) => res.ok ? local : this.downloadTrack(tr));
     p.catch(() => { if (tr.file === p) tr.file = null; });  // let a failed song be retried later
     tr.file = p;
     return p;
@@ -546,6 +562,85 @@ class Landing {
     document.getElementById("playLabel").textContent = tr ? tr.title : this.src === "synth" ? "Built-in beat" : "Play music";
     document.getElementById("playSub").textContent = this.status || (tr ? tr.artist + (this.playing ? "" : " · paused") : "");
     document.getElementById("skip").hidden = !(this.src === "music" && tr);
+    if (this.useYt) {
+      const np = document.getElementById("npTrack");
+      if (np) np.textContent = tr ? tr.title + " · " + tr.artist : "";
+    }
+  }
+
+  // ---- Hosted: the same playlist through YouTube's embedded player ---------------
+  // No audio files exist on the hosted site. The player lives in the visible "Now playing" card
+  // (#ytCard), which only appears once music starts and is never hidden while it plays.
+  ensureYt() {
+    if (this.yt) return this.yt;
+    const yt = this.yt = createYtEmbed({ mount: document.getElementById("ytCard") });
+    yt.onEnded(() => { if (this.playing) this.playTrackYt(this.trackPos + 1); });
+    yt.onError((message) => { if (this.ytReady) this.ytFailed(message); });  // errors of the previous video are stale
+    return yt;
+  }
+  // Browsers block sound without a click: wait for the first one (or the play button).
+  startYt(gesture) {
+    if (!gesture) {
+      this.playing = false; this.status = "Click anywhere for quiet music"; this.renderPlayer();
+      return;
+    }
+    this.autoplayPending = false; this.playing = true;
+    if (this.track) { this.yt?.play(); this.renderPlayer(); } else this.playTrackYt(0);
+  }
+  toggleYt() {
+    this.playing = !this.playing;
+    if (!this.playing) this.yt?.pause();
+    else if (this.track) { this.ensureYt().play(); this.status = ""; }
+    else this.playTrackYt(0);
+    this.renderPlayer();
+  }
+  skipYt() { this.autoplayPending = false; this.playing = true; this.playTrackYt(this.trackPos + 1); }
+  async playTrackYt(k) {
+    const n = PLAYLIST.length, tr = PLAYLIST[this.order[((k % n) + n) % n]], token = ++this.loadToken;
+    this.trackPos = k; this.track = tr; this.status = "Loading…"; this.ytSince = performance.now(); this.beatIdx = null; this.ytReady = false;
+    document.body.classList.add("yt-on");
+    this.renderPlayer();
+    try {
+      await this.ensureYt().load(tr.id, { volume: MUSIC_VOLUME, rate: 1 });
+      if (token === this.loadToken) this.ytReady = true;
+    } catch (err) {
+      if (token === this.loadToken) this.ytFailed(err.message);
+    }
+  }
+  // A video that cannot play (removed, embedding off, YouTube blocked) is skipped. Every song gets
+  // one try per pass: after a full pass with nothing playing, stop instead of looping.
+  ytFailed(message) {
+    if (!this.playing || this.failedToken === this.loadToken) return;
+    this.failedToken = this.loadToken;
+    console.warn("[music]", this.track?.title, message);
+    if (++this.fails < PLAYLIST.length) { this.playTrackYt(this.trackPos + 1); return; }
+    this.playing = false; this.fails = 0; this.track = null; this.status = "Songs could not be played";  // play tries again from the top
+    this.yt?.stop();
+    this.renderPlayer();
+  }
+  // Runs every frame: notices that YouTube really started (a success) or is waiting for a click.
+  ytTick(now) {
+    if (!this.playing || !this.yt) return false;
+    if (this.yt.isPlaying()) {
+      if (this.fails || this.status) { this.fails = 0; this.status = ""; this.renderPlayer(); }
+      return true;
+    }
+    if (this.track && !this.status.startsWith("Press") && now - this.ytSince > 4000 && this.failedToken !== this.loadToken) {
+      this.status = "Press play in the player"; this.renderPlayer();
+    }
+    return false;
+  }
+  // YouTube's audio cannot be analysed, so the visuals follow a gentle pulse at the song's tempo.
+  // Returns true on the frame a beat lands; this.bass is the smooth bass level the visuals read.
+  ytPulse(now, dt) {
+    if (!this.ytTick(now)) { this.beatIdx = null; this.bass *= Math.exp(-dt * 3); return false; }
+    const tr = this.track, bpm = tr?.beat?.bpm || tr?.bpm || BPM, period = 60 / bpm;
+    const pos = Math.max(0, this.yt.getTime() - (tr?.beat?.first || 0)), idx = Math.floor(pos / period);
+    const target = 0.04 + 0.16 * Math.exp(-(pos - idx * period) * 5);
+    this.bass += (target - this.bass) * Math.min(1, dt * 14);
+    const beat = this.beatIdx !== null && idx > this.beatIdx;
+    this.beatIdx = idx;
+    return beat;
   }
 
   // ---- Fallback: a small synthesized loop (no files) -----------------------------
@@ -608,7 +703,8 @@ class Landing {
 
     // Bass level and beats from the analyser
     let beat = false;
-    if (this.actx && playing) {
+    if (this.useYt) beat = this.ytPulse(now, dt);
+    else if (this.actx && playing) {
       this.an.getByteFrequencyData(this.fbuf);
       const e = (this.fbuf[1] + this.fbuf[2] + this.fbuf[3] + this.fbuf[4]) / 1020;  // ~40–200 Hz
       this.bass += (e - this.bass) * Math.min(1, dt * 14);
@@ -805,5 +901,19 @@ class Landing {
     for (const c of this.front) drawCloud(c, this.fctx);
   };
 }
+
+// Music credits (CC BY needs them): the attribution of every hosted song that has one. Hidden when there are none.
+(async () => {
+  try {
+    const res = await fetch("/library.json");
+    if (!res.ok) return;
+    const credits = ((await res.json())?.songs ?? []).map((song) => song?.attribution).filter((text) => typeof text === "string" && text.trim());
+    if (!credits.length) return;
+    const list = document.getElementById("creditList"), box = document.getElementById("credits");
+    if (!list || !box) return;
+    for (const text of credits) { const li = document.createElement("li"); li.textContent = text; list.appendChild(li); }
+    box.hidden = false;
+  } catch {}
+})();
 
 window.airdeck = new Landing();  // exposed for debugging in the console

@@ -1,0 +1,17 @@
+{
+  "name": "airdeck",
+  "version": "1.0.0",
+  "private": true,
+  "description": "AirDeck: DJ with your hands in the browser. Local Python server, or hosted on Cloudflare Workers.",
+  "type": "module",
+  "scripts": {
+    "build": "node scripts/build-site.mjs",
+    "dev": "node scripts/build-site.mjs && wrangler dev",
+    "deploy": "node scripts/build-site.mjs && wrangler deploy",
+    "upload-music": "node scripts/upload-music.mjs",
+    "test": "bash tests/run.sh"
+  },
+  "devDependencies": {
+    "wrangler": "^4"
+  }
+}

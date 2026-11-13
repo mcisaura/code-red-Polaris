@@ -11,6 +11,10 @@
 //     cancel: () => {},                       // the set being prepared was dropped (New set): stop loading it
 //     loadingText: () => "Downloading …",     // what's loading right now, for the loading screen (optional)
 //     begin: () => {},                        // start the set, on "Go"
+//     checkSong: async (song) => bool,        // hosted only: true if YouTube can't play the song (greyed out, unselectable)
+//   On the hosted site (config().hosted) the picker has two groups, `hosted: true` songs (real audio: the full
+//   game) first, then the YouTube songs (beats only). A set is all one kind: once a song is picked the other
+//   group is disabled until Clear. checkSong is only asked about YouTube songs.
 //   });
 //   screens.results({ score, perfect, good, miss, best, accuracy });
 //   screens.paused({ resume, restart, newSet });   // the pause panel (the page pauses the set)
@@ -21,8 +25,14 @@
 const handCheckMs = 800; // both hands in view this long counts as checked
 const setSize = { min: 2, max: 5 };
 const secondsPerSong = 30; // about how long each song plays in a set
+const checkConcurrency = 4; // hosted: songs checked for YouTube availability at once
 const blendTolerance = 0.08; // tempos this close (halved or doubled) blend; further apart, a cut (as queue.js)
 const savedSetKey = "airmix-set";
+const groups = {
+  full: { title: "Full game · mixes and filter", locked: "Clear your picks to choose from this group." },
+  yt: { title: "YouTube · beats only", locked: "Clear your picks to choose from this group." },
+};
+const kindOf = (song) => (song?.hosted === true ? "full" : "yt");
 
 // Tiny pictures for the three moves, in the page's colors.
 const pictures = {
@@ -87,8 +97,14 @@ function saveSet(ids) {
   }
 }
 
-export function createStartScreen(stage, { library, startCamera, handSeen, prepare, begin, loadingText = () => null, cancel = () => {} }) {
+export function createStartScreen(stage, { library, startCamera, handSeen, prepare, begin, loadingText = () => null, cancel = () => {}, config = async () => ({ youtube: true }), checkSong = null }) {
   addStyles();
+  let youtube = true; // false on the hosted site: songs can't be downloaded, so no download badges or hints
+  let hostedSite = false; // the hosted site: the picker has two groups, and a YouTube set has plain song changes (no blends)
+  let known = new Map(); // the picker's songs by id
+  // Whether the set plays on the full engine (blends, cuts, filter shapes): always locally; on the hosted site only
+  // for a set of `hosted: true` songs. A YouTube set has plain song changes.
+  const fullGame = (ids) => youtube || (ids.length > 0 && ids.every((id) => known.get(id)?.hosted === true));
   let root = null;
   let cameraReady = false; // the camera's on and the hands have been checked once
   let loading = null; // the set being prepared
@@ -110,17 +126,34 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
     const mine = ++run;
     cancel(); // a set that was still loading stops (downloads, and starting)
     show(`<div class="djStart-panel"><p class="djStart-status">Loading the songs…</p></div>`);
+    try {
+      const settings = await config();
+      youtube = settings.youtube !== false;
+      hostedSite = settings.hosted === true;
+    } catch {
+      youtube = true;
+      hostedSite = false;
+    }
     let songs;
     try {
       songs = await library();
     } catch (error) {
-      if (mine === run) showLoadError(error, setSelect);
+      if (mine !== run) return;
+      if (error?.empty) showEmpty();
+      else showLoadError(error, setSelect);
       return;
     }
     if (mine !== run) return; // another screen came up meanwhile
-    const known = new Set(songs.map((song) => song.id));
+    // Without downloads, a song that isn't in music/ can't be played at all.
+    if (!youtube) songs = songs.filter((song) => song.available !== false);
+    if (!songs.length) return showEmpty();
+    if (hostedSite) songs = [...songs.filter((song) => song.hosted === true), ...songs.filter((song) => song.hosted !== true)]; // the full game first
+    known = new Map(songs.map((song) => [song.id, song]));
+    const unavailable = new Set(); // hosted: songs YouTube says it can't play (checkSong)
+    let picking = true;
     const missing = songs.filter((song) => song.available === false).length;
     let picked = cleanSet(lastSet.length ? lastSet : savedSet(), known);
+    if (hostedSite) picked = picked.filter((id) => kindOf(known.get(id)) === kindOf(known.get(picked[0]))); // a set is one kind
 
     show(`
       <div class="djStart-panel djStart-wide">
@@ -129,16 +162,17 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
         <ul class="djStart-songs" role="listbox" aria-multiselectable="true" aria-label="Songs">
           ${songs
             .map(
-              (song) => `
-            <li><button type="button" role="option" data-id="${escape(song.id)}" aria-label="${escape(`${song.title} by ${song.artist}${song.bpm ? `, ${Math.round(song.bpm)} BPM` : ""}${song.available === false ? ", downloads first" : ""}`)}">
+              (song, index) => `${hostedSite && (index === 0 || kindOf(songs[index - 1]) !== kindOf(song)) ? `
+            <li class="djStart-group" role="presentation" data-group="${kindOf(song)}"><b>${escape(groups[kindOf(song)].title)}</b><small class="djStart-grouphint" hidden>${escape(groups[kindOf(song)].locked)}</small></li>` : ""}
+            <li><button type="button" role="option" data-id="${escape(song.id)}" aria-label="${escape(`${song.title} by ${song.artist}${song.bpm ? `, ${Math.round(song.bpm)} BPM` : ""}${youtube && song.available === false ? ", downloads first" : ""}`)}">
               <span class="djStart-order"></span>
               <span class="djStart-song"><b>${escape(song.title)}</b><small>${escape(song.artist)}${song.genre ? ` · ${escape(song.genre)}` : ""}</small></span>
-              <span class="djStart-bpm">${song.bpm ? `${Math.round(song.bpm)} BPM` : ""}${song.available === false ? `<span class="djStart-dl" title="Not on this computer yet: it downloads the first time you play it">↓ download</span>` : ""}</span>
+              <span class="djStart-bpm"><span class="djStart-na" hidden>Not available on YouTube</span>${song.bpm ? `${Math.round(song.bpm)} BPM` : ""}${youtube && song.available === false ? `<span class="djStart-dl" title="Not on this computer yet: it downloads the first time you play it">↓ download</span>` : ""}</span>
             </button></li>`,
             )
             .join("")}
         </ul>
-        ${missing ? `<p class="djStart-hint">Songs marked ↓ download the first time you play them (about 20 s each). To get them all now, run <code>python prefetch.py</code>.</p>` : ""}
+        ${missing && youtube ? `<p class="djStart-hint">Songs marked ↓ download the first time you play them (about 20 s each). To get them all now, run <code>python prefetch.py</code>.</p>` : ""}
         <p class="djStart-flow" aria-live="polite"></p>
         <div class="djStart-row">
           <button class="secondary" type="button" data-clear>Clear</button>
@@ -148,17 +182,30 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
 
     const flow = root.querySelector(".djStart-flow");
     const play = root.querySelector("[data-play]");
-    const byId = new Map(songs.map((song) => [song.id, song]));
+    const byId = known;
     const render = () => {
+      if (unavailable.size) picked = picked.filter((id) => !unavailable.has(id));
+      // The hosted site: a set is one kind, so the other group is off until Clear.
+      const lock = hostedSite && picked.length ? kindOf(byId.get(picked[0])) : null;
+      for (const hint of root.querySelectorAll("[data-group]")) hint.querySelector(".djStart-grouphint").hidden = !lock || hint.dataset.group === lock;
       for (const button of root.querySelectorAll("[data-id]")) {
+        const gone = unavailable.has(button.dataset.id);
+        const other = lock !== null && kindOf(byId.get(button.dataset.id)) !== lock;
+        button.disabled = gone || other;
+        button.setAttribute("aria-disabled", String(gone || other));
+        button.classList.toggle("gone", gone);
+        button.classList.toggle("locked", other);
+        const note = button.querySelector(".djStart-na");
+        if (note) note.hidden = !gone;
         const index = picked.indexOf(button.dataset.id);
         button.setAttribute("aria-selected", String(index !== -1));
         button.querySelector(".djStart-order").textContent = index === -1 ? "" : String(index + 1);
       }
       const set = picked.map((id) => byId.get(id));
+      const full = fullGame(picked);
       flow.innerHTML = set.length
         ? `${set
-            .map((song, i) => `${i ? `<span class="djStart-mix ${blends(set[i - 1], song) ? "" : "cut"}">${blends(set[i - 1], song) ? "blend" : "cut"}</span>` : ""}<span>${escape(song.title)}</span>`)
+            .map((song, i) => `${i ? (full ? `<span class="djStart-mix ${blends(set[i - 1], song) ? "" : "cut"}">${blends(set[i - 1], song) ? "blend" : "cut"}</span>` : `<span class="djStart-then" aria-label="then">›</span>`) : ""}<span>${escape(song.title)}</span>`)
             .join("")} <em>· about ${Math.max(1, Math.round((set.length * secondsPerSong) / 60))} min</em>`
         : "Nothing picked yet.";
       play.disabled = picked.length < setSize.min;
@@ -178,6 +225,7 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
     play.addEventListener(
       "click",
       () => {
+        picking = false;
         lastSet = picked;
         saveSet(picked);
         prepareSet(picked); // the songs load while you read and get the camera going
@@ -187,18 +235,40 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
       { once: true },
     );
     render();
+    // Hosted: ask YouTube about every song up front, a few at a time (the answers are cached by the page).
+    // Only a definite "gone" greys a song out; a failed check (offline, a server error) leaves it pickable.
+    if (checkSong) {
+      const waiting = songs.filter((song) => song.hosted !== true); // hosted songs are plain audio: nothing to ask YouTube
+      const worker = async () => {
+        while (waiting.length && picking && mine === run) {
+          const song = waiting.shift();
+          let gone = false;
+          try {
+            gone = (await checkSong(song)) === true;
+          } catch {
+            // could not tell: it stays pickable
+          }
+          if (gone && picking && mine === run) {
+            unavailable.add(song.id);
+            render();
+          }
+        }
+      };
+      for (let i = 0; i < checkConcurrency; i += 1) worker();
+    }
   }
 
   // ---- how to play (first time), the camera, the hands
   function intro() {
+    const full = fullGame(lastSet);
     show(`
       <div class="djStart-panel">
         <h1>AirMix</h1>
         <p>Your hands are the DJ controls: hit the dots on the beat and you play the set.</p>
-        <ol class="djStart-moves">
+        <ol class="djStart-moves${full ? "" : " two"}">
           <li>${pictures.hit}<span>Thumbs and index fingers on the dots</span></li>
-          <li>${pictures.slide}<span>Slide along the track to mix the next song in</span></li>
-          <li>${pictures.cut}<span>Hit the orange shape: the next song slams in</span></li>
+          ${full ? `<li>${pictures.slide}<span>Slide along the track to mix the next song in</span></li>` : ""}
+          <li>${pictures.cut}<span>${full ? "Hit the orange shape: the next song slams in" : "Hit the orange shape: the next song comes in"}</span></li>
         </ol>
         <button class="lime" type="button">Start</button>
       </div>`);
@@ -274,10 +344,14 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
     }
   }
 
+  function showEmpty(message = "No songs in the library yet. Add an audio file.") {
+    show(`<div class="djStart-panel"><h1>AirMix</h1><p class="djStart-status">${escape(message)}</p></div>`);
+  }
+
   function showLoadError(error, retry) {
     show(`<div class="djStart-panel"><h1>Music couldn't load</h1>
       <p>${escape(error?.message || "Try another set or check the local server.")}</p>
-      <p class="djStart-hint">${error?.detail ? `${escape(error.detail)}${/[.!?]$/.test(error.detail) ? "" : "."} ` : "Check your internet connection, or pick other songs. "}To get every song onto this computer at once, run <code>python prefetch.py</code>.</p>
+      <p class="djStart-hint">${error?.detail ? `${escape(error.detail)}${/[.!?]$/.test(error.detail) ? "" : "."} ` : "Check your internet connection, or pick other songs. "}${youtube ? "To get every song onto this computer at once, run <code>python prefetch.py</code>." : ""}</p>
       <div class="djStart-row"><button type="button" class="secondary" data-new>New set</button>
       <button type="button" class="lime" data-retry>Try again</button></div></div>`);
     root.querySelector("[data-new]").addEventListener("click", setSelect, { once: true });
@@ -389,6 +463,8 @@ export function createStartScreen(stage, { library, startCamera, handSeen, prepa
     countIn: (onGo) => countdown(onGo, 700),
     replay,
     newSet: setSelect,
+    // The set failed while playing (the hosted site's video couldn't play): the load-error screen.
+    failed: (message) => showLoadError(new Error(message), replay),
   };
 }
 
@@ -413,6 +489,7 @@ function addStyles() {
 }
 .djStart p { margin: 0 auto 14px; max-width: 46ch; font-size: 15px; line-height: 1.45; color: var(--text); }
 .djStart-moves { display: grid; grid-template-columns: repeat(3, 1fr); gap: 10px; margin: 0 0 18px; padding: 0; list-style: none; }
+.djStart-moves.two { grid-template-columns: repeat(2, 1fr); }
 .djStart-moves li { display: flex; flex-direction: column; align-items: center; gap: 6px; font-size: 12.5px; line-height: 1.3; color: var(--muted); }
 .djStart-moves svg { width: 92px; height: 69px; padding: 4px; border-radius: 10px; background: #f3f8fd; border: 1px solid #c9dbee; }
 .djStart button { min-width: 150px; font-size: 17px; }
@@ -437,6 +514,18 @@ function addStyles() {
   background: linear-gradient(#e3f1fd, #cfe6fb); border-color: #7fb4e6;
 }
 .djStart .djStart-songs button:disabled { opacity: 0.5; cursor: default; }
+/* A song YouTube can't play: greyed and unselectable, with its note at full strength. */
+.djStart .djStart-songs button.gone, .djStart .djStart-songs button.gone:hover:not(:disabled) { opacity: 1; cursor: not-allowed; background: #f1f3f5; border-color: transparent; }
+.djStart .djStart-songs button.gone .djStart-song, .djStart .djStart-songs button.gone .djStart-order { opacity: 0.5; filter: grayscale(1); }
+.djStart-group { display: flex; flex-wrap: wrap; align-items: baseline; gap: 2px 10px; margin: 8px 6px 2px; padding-top: 6px; border-top: 1px solid #dfe8f1; }
+.djStart-group:first-child { margin-top: 2px; padding-top: 0; border-top: 0; }
+.djStart-group b { font-size: 12px; font-weight: 800; letter-spacing: 0.06em; text-transform: uppercase; color: #8a4510; }
+.djStart-grouphint { font-size: 12px; color: #8a4510; }
+.djStart-grouphint[hidden] { display: none; }
+.djStart .djStart-songs button.locked, .djStart .djStart-songs button.locked:hover:not(:disabled) { cursor: not-allowed; }
+.djStart-na { font-weight: 700; color: #8a4510; }
+.djStart-na[hidden] { display: none; }
+.djStart-then { color: #4a5a6a; font-weight: 700; }
 .djStart-order {
   width: 22px; height: 22px; border-radius: 50%; display: grid; place-items: center;
   border: 1.5px solid #9fb6cc; font: bold 12px Tahoma, sans-serif; color: #fff; background: #fff;

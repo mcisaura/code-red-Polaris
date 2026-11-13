@@ -98,6 +98,8 @@
     display: inline-block; min-width: 18px; margin-left: 4px; padding: 0 5px; border-radius: 9px;
     background: rgba(255,255,255,.85); color: #3d1800; font-size: 11px; text-align: center; text-shadow: none;
   }
+  #startMusic { display: block; width: 100%; margin: 8px 0 0; padding: 12px 16px; font-size: 16px; font-weight: 700; }
+  #startMusic[hidden], .fxOnly[hidden] { display: none !important; }
   #songStatus { font-size: 12px; color: var(--muted); margin-top: 8px; overflow-wrap: anywhere; }
   #songStatus.error { color: #b3261e; }
   .song .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
@@ -125,6 +127,7 @@
   #cinema img { position: absolute; inset: 0; width: 100%; height: 100%; object-fit: contain; }
   [hidden] { display: none !important; }
   .songQueue { display: grid; grid-template-columns: 1fr; padding: 0 !important; overflow: hidden; }
+  #ytMount { min-width: 0; border-top: 1px solid var(--border); }
   #queueMount { min-width: 0; border-top: 1px solid var(--border); }
   aside { min-width: 0; }
   @media (max-width: 600px) { .songQueue { grid-template-columns: 1fr; } #queueMount { border-left: 0; border-top: 1px solid var(--border); } }
@@ -199,8 +202,10 @@
     <div class="song" id="songCard">
       <h2><span>Song</span><span class="queueBadge">Queue <span id="queueCount">0</span></span></h2>
       <div id="transport"></div>
+      <button id="startMusic" type="button" hidden>Start music</button>
       <div id="songStatus" role="status" aria-live="polite">Pick songs from the library below or start the AI DJ.</div>
     </div>
+    <div id="ytMount" hidden></div>
     <div id="queueMount"></div>
     </div>
     <button id="detailsBtn" class="secondary" aria-expanded="false" aria-controls="deckDetails">Show controls &amp; help</button>
@@ -214,10 +219,10 @@
     <div class="card glass">
       <h2><span>Visual effect <span class="muted">(shape between your fingertips)</span> <span class="muted" id="modeTag"></span></span></h2>
       <div class="chips" id="visChips"></div>
-      <h2 style="margin-top:14px"><span>Effects</span></h2>
-      <div class="chips" id="fxChips"></div>
-      <p class="keyhelp">Test keys: <b>S</b> song mode · <b>←→</b> blend · <b>Enter</b> finish blend · <b>V</b> visuals mode · <b>F</b> effects mode · <b>1–5</b> pick · <b>↑↓</b> amount · <b>K</b> lock · <b>L</b> frame · <b>Esc</b> leave mode · <b>D</b> tracking debug.<br>
-      Right fist in the upper-right zone → left hand: 1 finger = next song (mixed in with your hands: left hand height = crossfade, right hand up = old song out faster), 2 = previous, 3+ = nothing. Left fist in the left zone → right hand picks an effect (open hand = all off, raise/lower right hand = strength, full strength below the lock zone). Right fist in the bottom-right corner → left hand picks a visual (1–5). The choice applies when the fist leaves its zone. Then show both hands in any pose: the shape between your two thumb tips and two index tips shows the visual.</p>
+      <h2 style="margin-top:14px" class="fxOnly"><span>Effects</span></h2>
+      <div class="chips fxOnly" id="fxChips"></div>
+      <p class="keyhelp">Test keys: <b>S</b> song mode · <b>←→</b> blend · <b>Enter</b> finish blend · <b>V</b> visuals mode · <span class="fxOnly"><b>F</b> effects mode · </span><b>1–5</b> pick · <span class="fxOnly"><b>↑↓</b> amount · </span><b>K</b> lock · <b>L</b> frame · <b>Esc</b> leave mode · <b>D</b> tracking debug.<br>
+      Right fist in the upper-right zone → left hand: 1 finger = next song (mixed in with your hands: left hand height = crossfade, right hand up = old song out faster), 2 = previous, 3+ = nothing. <span class="fxOnly">Left fist in the left zone → right hand picks an effect (open hand = all off, raise/lower right hand = strength, full strength below the lock zone). </span>Right fist in the bottom-right corner → left hand picks a visual (1–5). The choice applies when the fist leaves its zone. Then show both hands in any pose: the shape between your two thumb tips and two index tips shows the visual.</p>
     </div>
     <div id="cards"></div>
     <div class="card glass between">
@@ -228,7 +233,7 @@
     </div>
     <p class="help glass">
       <b>Left pinch</b> sets speed (closed = 0.9×, open = 1.1×).
-      <b>Right pinch</b> sets the filter (closed = muffled, open = full sound).
+      <span class="fxOnly"><b>Right pinch</b> sets the filter (closed = muffled, open = full sound).</span>
       <b>Hands apart</b> = louder. If a hand leaves the frame, its control holds its last value.
     </p>
     </div>
@@ -242,7 +247,9 @@ import { Deck } from "./audio.js?v=8";
 import { FrameFx } from "./frame.js?v=8";
 import { BubbleParticles } from "./bubble-particles.js";
 import { createDeckTour } from "./deckTour.js";
-import { createQueue, createQueuePanel, createTransport, createUpNext } from "./queue.js?v=4";
+import { tourStepsFor } from "./deckTour.js";
+import { createYtEmbed } from "./ytEmbed.js";
+import { createQueue, createQueuePanel, createTransport, createUpNext, loadConfig } from "./queue.js?v=6";
 
 const MEDIAPIPE_URL = "https://cdn.jsdelivr.net/npm/@mediapipe/tasks-vision@0.10.14";
 const MODEL_URL = "https://storage.googleapis.com/mediapipe-models/hand_landmarker/hand_landmarker/float16/1/hand_landmarker.task";
@@ -421,7 +428,7 @@ const row = (id, label) =>
 const CONTROL_NAMES = { left: "speed", right: "filter" };
 $("cards").innerHTML = ["left", "right"].map((side) => `
   <div class="card glass ${side}">
-    <h2><span><span class="side">●</span> ${side} hand · ${CONTROL_NAMES[side]}</span><span class="pose" id="${side}Pose">not detected</span></h2>
+    <h2><span><span class="side">●</span> ${side} hand<span id="${side}CtlName"> · ${CONTROL_NAMES[side]}</span></span><span class="pose" id="${side}Pose">not detected</span></h2>
     <div class="control" id="${side}Control">–</div>
     ${row(side + "Pinch", "Pinch")}
     ${row(side + "Height", "Height")}
@@ -834,7 +841,7 @@ function update(result, now) {
   if (basicOn && modes.current === "normal" && modes.hold === 0 && !lock.locked && !inZone && !blend.active) {
     // a closed fist (mode gesture) must not drag the speed / filter to its pinch value
     if (left && left.pose !== "✊ fist") knobs.left = stabilize(knobs.left, left.pinch);
-    if (right && right.pose !== "✊ fist") knobs.right = stabilize(knobs.right, right.pinch);
+    if (right && right.pose !== "✊ fist" && !fxOff) knobs.right = stabilize(knobs.right, right.pinch);
     if (between) controls.volume = deadband(controls.volume, between.value, DEADBAND / 2);
     applyKnobs();
   }
@@ -1017,6 +1024,30 @@ try { localStorage.removeItem("airdeck-visual"); } catch {}   // drop picks save
 function setVisual(name) {
   visualFx = name;
 }
+// Effects are per song. A YouTube embed item plays in YouTube's own player, which gives no access to the audio:
+// no filter, no effects. While the current song is one, the effects mode, the effect picks, the filter control and
+// their help are hidden and the gestures for them do nothing. A hosted track or an added file plays on the deck and
+// has them all. syncFx() follows the queue live (see below).
+let fxOff = false;
+function applyFxOff(on) {
+  const changed = on !== fxOff;
+  fxOff = on;
+  if (on && modes.current === "fx") enterMode("normal");
+  document.querySelectorAll(".fxOnly").forEach((node) => { node.hidden = on; });
+  $("rightCtlName").hidden = on;
+  $("rightControl").hidden = on;
+  if (on && changed) { lastFx = null; knobs.right = 1; controls.freq = FREQ_OFF; }
+}
+// Is the song that is current (or loading) a YouTube embed item? Nothing current: whatever the queue is playing.
+function currentIsEmbed() {
+  try {
+    const { items, currentId } = queue.getState();
+    const item = items.find((entry) => entry.id === currentId);
+    if (item) return item.embed === true;
+    return queue.isEmbedActive?.() === true;
+  } catch { return false; }
+}
+const syncFx = () => applyFxOff(currentIsEmbed());
 const modes = {
   current: "normal",       // "normal" | "song" | "fx" | "vis"
   keyForced: false,        // set by the S / F / V test keys
@@ -1043,6 +1074,7 @@ function fillFit(text, x, y, size, weight, maxW) {
 const fingerCount = (h) => { const n = h.ext.slice(1).filter(Boolean).length; return n === 4 && h.ext[0] ? 5 : n; };
 
 function enterMode(m, forced = false) {
+  if (m === "fx" && fxOff) m = "normal";   // hosted: there are no effects to pick
   modes.current = m;
   modes.keyForced = forced && m !== "normal";
   modes.count = 0; modes.pick = 0; modes.pending = 0; modes.hold = 0; modes.lostSince = null; modes.dropSince = null; modes.zeroSince = null;
@@ -1050,7 +1082,7 @@ function enterMode(m, forced = false) {
 
 // Is this hand a fist inside the zone for its side? Left edge = effects, right edge above the visuals corner = songs. (palmX is mirrored)
 const inFistZone = (h, side) => !!h && h.pose === "✊ fist" &&
-  (side === "right" ? h.palmX > 1 - FIST_ZONE_W && h.palmY < VIS_ZONE_Y : h.palmX < FIST_ZONE_W && (!lock.locked || h.palmY >= LOCK_ZONE_Y));
+  (side === "right" ? h.palmX > 1 - FIST_ZONE_W && h.palmY < VIS_ZONE_Y : !fxOff && h.palmX < FIST_ZONE_W && (!lock.locked || h.palmY >= LOCK_ZONE_Y));
 const inVisZone = (h) => !!h && h.pose === "✊ fist" && h.palmX > 1 - FIST_ZONE_W && h.palmY >= VIS_ZONE_Y;
 
 function updateModes(left, right, now) {
@@ -1161,6 +1193,7 @@ function pick(n) {
     if (VIS_NAMES[n - 1] !== "off") tourPicks.vis++;
     flash(VIS_NAMES[n - 1] === "off" ? "Visuals off" : `✨ ${VIS_LABELS[VIS_NAMES[n - 1]]}`);
   } else if (modes.current === "fx") {
+    if (fxOff) return;   // the embedded player has no filter or echo: inert, nothing to say
     if (n === 5) { deck.clearEffects?.(); lastFx = null; flash("All effects off"); return; }
     const name = FX_NAMES[n - 1];
     const on = deck.toggleEffect?.(name);
@@ -1216,6 +1249,9 @@ function setBlendOn(on) {
 $("blendBtn").addEventListener("click", () => setBlendOn(!blendOn));
 setBlendOn(blendOn);
 
+// YouTube songs (the hosted site) play in the embedded player, not on the deck: ask the queue.
+const queuePlaying = () => queue.isPlaying?.() ?? !!deck.playing;
+const canBlendInto = (next) => queue.canHandBlend?.(next) ?? !next.embed;
 const blend = { active: false, starting: false, p: 0, sweep: 0, since: 0, lastInput: 0, last: 0, from: "", to: "", waiting: false, finishing: false, controls: null };
 const songTitle = (item) => (item ? [item.artist, item.title].filter(Boolean).join(" - ") || item.title || "song" : "song");
 
@@ -1246,13 +1282,14 @@ async function nextSong() {
     flash("A mix is already in progress");
     return;
   }
-  if (!deck.playing) {
+  if (!queuePlaying()) {
     // No outgoing audio to blend: start the queued song immediately.
     queue.next();
     flash("⏭ Playing next song");
     return;
   }
-  if (!blendOn || !next) {
+  // Two YouTube songs blend (the hand height sets both players' volumes); a mix of kinds is a plain cut.
+  if (!blendOn || !next || !canBlendInto(next)) {
     if (!queue.mixNow()) queue.next();
     flash("⏭ Next song");
     return;
@@ -1620,6 +1657,7 @@ function drawZones(now) {
   ctx.textAlign = "center";
   ctx.textBaseline = "middle";
   for (const z of defs) {
+    if (fxOff && z.mode === "fx") continue;   // hosted: no effects zone
     const active = modes.current === z.mode || (modes.current === "normal" && modes.fistSide === z.mode && modes.hold > 0);
     if (z.mode === "fx" && lock.locked) { z.y = H*LOCK_ZONE_Y; z.h = H-z.y; }
     ctx.globalAlpha = active ? 0.16 : 0.035;
@@ -1811,7 +1849,7 @@ function draw(left, right, between) {
     return;
   }
   drawKnobMeter("left", 24, COLORS.left, `speed ${controls.speed.toFixed(2)}×`);
-  drawKnobMeter("right", canvas.width - 40, COLORS.right, `filter ${formatHz(controls.freq)}`);
+  if (!fxOff) drawKnobMeter("right", canvas.width - 40, COLORS.right, `filter ${formatHz(controls.freq)}`);
 
   if (between) {
     drawWaveform(left.mid, right.mid);
@@ -1826,12 +1864,12 @@ function drawLockHud() {
   const pad = 14, barW = Math.min(240, canvas.width * FIST_ZONE_W - 56);
   const rows = [
     { label: `Speed ${controls.speed.toFixed(2)}×`, value: knobs.left, color: COLORS.left },
-    { label: `Filter ${formatHz(controls.freq)}`, value: knobs.right, color: COLORS.right },
+    ...(fxOff ? [] : [{ label: `Filter ${formatHz(controls.freq)}`, value: knobs.right, color: COLORS.right }]),
     { label: `Volume ${Math.round(controls.volume * 100)}%`, value: controls.volume, color: COLORS.between },
   ];
   const step = Math.min(38, (zoneH - 35) / 3);
   ctx.save();
-  aeroGlass(pad,20,barW+24,step*3+12,16);
+  aeroGlass(pad,20,barW+24,step*rows.length+12,16);
   ctx.textAlign="left";ctx.textBaseline="middle";
   rows.forEach((r,i)=>{
     const y=34+i*step;
@@ -2151,7 +2189,10 @@ function updateSidePanel() {
 // ---- Song + queue -------------------------------------------------------------------
 // Songs are added, ordered and picked in the queue panel (queue.js); the player
 // bar (progress, ⏮ ⏯ ⏭) shows here and at the top of the panel.
-const queue = createQueue(deck);
+// YouTube links on the hosted site play in YouTube's own player card (ytEmbed.js), under the Song card.
+const ytEmbed = typeof createYtEmbed === "function" ? createYtEmbed({ mount: $("ytMount") }) : null;
+const queue = createQueue(deck, { embed: ytEmbed });
+queue.on(() => syncFx());
 const queuePanel = createQueuePanel(queue, deck, { embedded: true });
 $("queueMount").append(queuePanel.element);
 $("transport").append(createTransport(queue, deck, { onNext: nextSong }));
@@ -2176,12 +2217,23 @@ function updateSongCard() {
 }
 queue.on(updateSongCard);
 
+// Hosted: browsers only start playback from a click. When the queue wanted to start without one (a hand gesture,
+// the AI DJ) or a video did not start by itself, this button appears; its click unlocks both players.
+const startMusicBtn = $("startMusic");
+startMusicBtn.addEventListener("click", () => { queue.startMusic?.(); });
+queue.on(() => { startMusicBtn.hidden = !queue.getState().needsStart; });
+
 calibBtn.addEventListener("click", calibrate);
 updateControls();
 
 // ---- First-visit tutorial (deckTour.js) ---------------------------------------------
 // Reads existing state only; "Show me" calls the same functions the S / F / V / K test keys use.
-if (typeof createDeckTour === "function") {
+async function startTour() {
+  // A YouTube song has no effects: when it is the first/current song the tutorial leaves that step out (and does
+  // not mention the filter). Hosted tracks and local songs keep it. The queue's first song is not known yet at
+  // page load on the hosted site, so wait briefly for the library; the default queue starts with hosted tracks.
+  syncFx();
+  const hosted = fxOff;
   const tourStorage = {
     getItem: (k) => { try { return localStorage.getItem(k); } catch { return null; } },
     setItem: (k, v) => { try { localStorage.setItem(k, v); } catch {} },
@@ -2190,11 +2242,12 @@ if (typeof createDeckTour === "function") {
   const tour = createDeckTour({
     mount: $("tourMount"),
     storage: tourStorage,
+    steps: tourStepsFor(hosted),
     getState: () => {
       const t = performance.now();
       return {
         bothHands: t - sides.left.lastSeen < HOLD_MS && t - sides.right.lastSeen < HOLD_MS,
-        playing: !!deck.playing,
+        playing: queuePlaying(),
         locked: lock.locked,
         speed: controls.speed, freq: controls.freq, volume: controls.volume,
         mode: modes.current,
@@ -2210,6 +2263,8 @@ if (typeof createDeckTour === "function") {
   setInterval(() => tour.tick(), 150);
   tour.init();
 }
+if (typeof createDeckTour === "function") startTour();
+syncFx();
 
 Object.assign(window.airdeck, { modes, frame, FX_NAMES, lock, controls, blend, update, canvas, trackingDebug, sides });
 

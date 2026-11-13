@@ -16,6 +16,7 @@
 // allow sound after one. The panel and player bar already do this for their buttons.
 
 import { createTransitions } from "./transitions.js";
+import { parseYouTubeId, BAD_LINK_MESSAGE, nearestRate } from "./ytEmbed.js";
 
 const djSongsAhead = 3; // the DJ keeps this many songs queued after the current one (the choices)
 const choiceCount = 3; // songs offered to choose from for the next mix
@@ -27,6 +28,10 @@ const voiceTimeoutMs = 15000; // never let a stuck voice line stall the set
 const restartThreshold = 3; // ⏮ restarts the song if it's past this many seconds, else goes back one
 const progressPollMs = 400;
 const hoverDecodeMs = 250; // hovering a song this long starts decoding it
+const embedLeadSeconds = 1; // the AI DJ starts a YouTube crossfade this long before the fade has to end with the video
+const blendSeconds = 8; // a timed YouTube crossfade (as transitions.js's blends) lasts this long...
+const shortBlendSeconds = 4; // ...and this long with short mixes
+const maxNudge = 0.08; // the incoming song's speed is only matched to the outgoing one's within 8% (as transitions.js)
 const seekStepSeconds = 5; // the arrow keys move the seek bar this far
 
 // Python's dev server sometimes resets the first request on a connection that sat
@@ -41,6 +46,69 @@ async function retryOnNetworkError(request) {
   }
 }
 
+// What the server behind this page can do: GET /api/config -> { youtube, youtubeEmbed, hosted }. Asked
+// once and shared. The hosted Cloudflare site answers youtube: false (no downloads) and youtubeEmbed:
+// true (YouTube links play in YouTube's own embedded player); the local Python server answers
+// youtube: true, youtubeEmbed: false. Anything else (an old server, a failed request) counts as the local behaviour.
+let configPromise = null;
+export function loadConfig(apiBase = "/api") {
+  configPromise ??= (async () => {
+    try {
+      const response = await fetch(`${apiBase}/config`);
+      const config = response.ok ? await response.json() : null;
+      return { youtube: config?.youtube !== false, youtubeEmbed: config?.youtubeEmbed === true, hosted: config?.hosted === true };
+    } catch {
+      return { youtube: true, youtubeEmbed: false, hosted: false };
+    }
+  })();
+  return configPromise;
+}
+
+// Hosted site: which library videos YouTube still plays in an embed, checked once per page through the Worker's
+// oEmbed proxy (GET /api/youtube/info?id=: 200 = fine, 404 = removed, private or not embeddable). Only a 404
+// counts as gone; a network error or any other status proves nothing, so it is neither cached nor held against the song.
+const availabilityCache = new Map(); // video id -> true | false
+const availabilityChecks = 4; // requests in flight at once
+async function checkVideoAvailable(apiBase, id) {
+  if (availabilityCache.has(id)) return availabilityCache.get(id);
+  try {
+    const response = await fetch(`${apiBase}/youtube/info?id=${encodeURIComponent(id)}`);
+    if (response.status === 404) {
+      availabilityCache.set(id, false);
+      return false;
+    }
+    if (response.ok) availabilityCache.set(id, true);
+  } catch {
+    // offline or the Worker is down: unknown, so the song stays
+  }
+  return true;
+}
+
+// A library song's beat info ({ bpm: precise, first: seconds of the first beat, duration: seconds }), when usable.
+const validBeat = (beat) => Boolean(beat) && Number.isFinite(beat.bpm) && beat.bpm > 0 && Number.isFinite(beat.first) && beat.first >= 0;
+const minBeatLeadSeconds = 0.4; // the incoming video needs this long (real time) to be put in place before the beat it joins on
+const autoplayWatchMs = 3000; // a video that has not started this long after play() was blocked from autoplaying
+
+// Where a beat-aligned crossfade between two embedded songs starts. `a` is the outgoing song's beat info, `b` the
+// incoming one's; rateOut and rateIn are the playback rates (song seconds per real second) and tOut where the
+// outgoing song is now (song seconds). The crossfade begins on the next outgoing beat at least minBeatLeadSeconds
+// away (waitSeconds from now, real time); the incoming video is put (seek, song seconds) where it will sit exactly
+// on one of its own beats at that moment, never before its first beat.
+export function embedBeatPlan(a, b, rateOut, rateIn, tOut) {
+  const periodOut = 60 / a.bpm;
+  const periodIn = 60 / b.bpm;
+  let beat = a.first + Math.max(0, Math.ceil((tOut - a.first) / periodOut - 1e-9)) * periodOut;
+  let waitSeconds = (beat - tOut) / rateOut;
+  while (waitSeconds < minBeatLeadSeconds) {
+    beat += periodOut;
+    waitSeconds = (beat - tOut) / rateOut;
+  }
+  const beats = Math.ceil((waitSeconds * rateIn) / periodIn - 1e-9);
+  return { waitSeconds, seek: b.first + beats * periodIn - waitSeconds * rateIn };
+}
+
+export const EMPTY_LIBRARY_MESSAGE = "No songs in the library yet. Add an audio file.";
+
 // Reordering math, shared by the panel's pointer drag and its keyboard moves (tested on its own).
 // dropIndexAt: the insertion point 0..mids.length for a pointer at y, given each row's vertical middle.
 export function dropIndexAt(mids, y) {
@@ -53,8 +121,13 @@ export function moveTarget(from, drop) {
   return drop > from ? drop - 1 : drop;
 }
 
-export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json" } = {}) {
-  // Items: { id, title, detail, url } for YouTube, { id, title, detail, file } for files.
+// embed: a YouTube player (ytEmbed.js's createYtEmbed, or a stub with the same methods) for the hosted
+// site's embed items; without one the queue can't take them. With a `second` player and a swap() (createYtEmbed
+// has both) two embed items can blend: the hands' level blend, the AI DJ's timed crossfade and the mix buttons.
+// On the hosted site (config hosted + youtubeEmbed) with a player, every library song is an embed item.
+export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json", embed = null } = {}) {
+  // Items: { id, title, detail, url } for YouTube, { id, title, detail, file } for files, and
+  // { id, title, detail, embed: true, videoId } for a YouTube video played in the embedded player.
   // DJ picks also carry dj: { intro, reason }, and browserVoice: false for AirMix sets (which stay quiet).
   let items = [];
   let currentId = null;
@@ -68,6 +141,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   let downloads = [];
   // The song library: { id, artist, title, file: "music/<id>.m4a", available }.
   let library = [];
+  let libraryLoaded = false; // the library file was read (it may still list no songs)
   // short: short mixes (each song plays about 20 s from where it gets going), so a
   // one-minute demo hears several transitions.
   const dj = { on: false, set: false, vibe: "", busy: false, talking: false, status: null, generation: 0, short: true, crowd: null };
@@ -200,10 +274,20 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     if (volumeHeld || !Number.isFinite(volume)) return;
     handVolume = volume;
     setDeckVolume(volume * duckLevel);
+    applyEmbedVolume();
   };
+  // The speed too: an embed item takes the nearest rate YouTube allows.
+  if (typeof deck.setSpeed === "function") {
+    const setDeckSpeedChain = deck.setSpeed.bind(deck);
+    deck.setSpeed = (speed) => {
+      setDeckSpeedChain(speed);
+      if (embedId !== null && !speedHeld && !embedMix && Number.isFinite(speed)) embed.setRate(speed);
+    };
+  }
   function duck(level) {
     duckLevel = level;
     setDeckVolume(handVolume * duckLevel);
+    applyEmbedVolume();
   }
   async function fadeTo(level, ms, stillWanted = () => true) {
     const from = duckLevel;
@@ -224,6 +308,23 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   let setPending = false; // a set is prepared but not started (beginSet) yet
   let loadingId = null; // the song being loaded right now, kept even if it moves out of the window
   let hoveredId = null;
+  // The embed item loaded in the YouTube player right now (null: the deck, or nothing, is playing).
+  let embedId = null;
+  // A blend between two embed items: { id (the incoming item), controls, inLevel, outLevel, timer }. While it
+  // runs, embedId is still the outgoing item (the current player) and the incoming one plays in embed.second;
+  // currentId is the incoming item, as with a deck blend. landEmbedMix() makes the incoming player current.
+  let embedMix = null;
+  const canPair = () => Boolean(embed?.second && typeof embed.swap === "function");
+  // Set once the config is known: library songs not marked `hosted: true` are then YouTube embed items (the
+  // hosted site). Songs with hosted: true have audio at music/<id>.m4a and are ordinary audio items.
+  let hostedEmbed = false;
+  const isEmbedSong = (song) => hostedEmbed && song.hosted !== true;
+  // Hosted autoplay: browsers only let a video start after a click. `unlocked` once a click has started (and primed)
+  // the players; `needsStart` asks the page to show "Start music" (state.needsStart) until then, or again when a
+  // video did not start by itself.
+  let unlocked = false;
+  let needsStart = false;
+  let libraryChecked = Promise.resolve(); // the library's availability checks (hosted)
 
   // Songs whose download or decoding failed: not retried in the background (asking to
   // play one tries again).
@@ -276,7 +377,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     const wanted = index === -1 ? items.slice(0, 1) : items.slice(Math.max(0, index - 1), index + 2);
     const hovered = items.find((item) => item.id === hoveredId);
     if (hovered) wanted.push(hovered);
-    wanted.filter((item) => !loadFailed.has(item.id)).forEach(decode);
+    wanted.filter((item) => !item.embed && !loadFailed.has(item.id)).forEach(decode); // embed items have no audio to decode
     const keep = new Set(wanted.map((item) => item.id));
     for (const id of decoded.keys()) {
       if (!keep.has(id) && id !== loadingId) {
@@ -310,6 +411,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   // entry: start where the song gets going (short mixes) instead of at 0.
   function playItem(id, { mix = false, entry = false } = {}) {
     cancelEnding();
+    landEmbedMix();
     const request = ++playRequest;
     requestedId = id;
     playsPending += 1;
@@ -334,6 +436,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     handMixStarted?.(null);
     stopVoice?.();
     dj.talking = false;
+    landEmbedMix(); // a blend between two YouTube songs lands at once (the incoming one stays, as on the deck)
     duck(1);
   }
 
@@ -341,14 +444,28 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
   async function loadLibrary() {
     try {
+      // The hosted site plays every library song in YouTube's own player (the id is the video id).
+      if (embed) {
+        const config = await loadConfig(apiBase);
+        hostedEmbed = config.hosted && config.youtubeEmbed;
+      }
       const response = await fetch(libraryUrl);
       if (!response.ok) return;
-      const { songs = [] } = await response.json();
-      library = songs.map((song) => ({ ...song, file: `music/${song.id}.m4a`, available: null }));
+      const data = await response.json();
+      const songs = (Array.isArray(data) ? data : data?.songs) ?? [];
+      libraryLoaded = true;
+      library = songs.map((song) => ({ ...song, file: `music/${song.id}.m4a`, available: hostedEmbed || song.hosted === true ? true : null }));
+      // The hosted site lists its own audio first: those songs have effects, so they lead the panel and the default queue.
+      if (hostedEmbed) library = [...library.filter((song) => song.hosted === true), ...library.filter((song) => song.hosted !== true)];
+      if (hostedEmbed) library.forEach((song) => (song.unavailable = isEmbedSong(song) && availabilityCache.get(song.id) === false));
       changed();
-      // Which songs are actually in music/ (prefetch.py fills it).
+      if (hostedEmbed) {
+        libraryChecked = checkLibrary(library.filter(isEmbedSong)); // YouTube availability: embed songs only
+        return; // nothing to look for in music/
+      }
+      // Which songs are actually in music/ (prefetch.py fills it). Hosted audio is known to be there.
       await Promise.all(
-        library.map(async (song) => {
+        library.filter((song) => song.hosted !== true).map(async (song) => {
           try {
             song.available = (await fetch(song.file, { method: "HEAD" })).ok;
           } catch {
@@ -362,12 +479,39 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     }
   }
 
+  // Checks each song of the hosted library once, a few at a time. A song YouTube no longer plays in an embed is
+  // marked `unavailable` (greyed out in the Library, left out of Add all, the default queue and the AI DJ's picks).
+  async function checkLibrary(songs) {
+    let next = 0;
+    const worker = async () => {
+      while (next < songs.length) {
+        const song = songs[next++];
+        if (song.unavailable || (await checkVideoAvailable(apiBase, song.id))) continue;
+        song.unavailable = true;
+        changed();
+      }
+    };
+    await Promise.all(Array.from({ length: availabilityChecks }, worker));
+  }
+  // Waits for the checks, but not for long: a slow network must not hold up the first song.
+  async function checkedSoon(ms = 1500) {
+    let timer;
+    await Promise.race([libraryChecked, new Promise((resolve) => (timer = setTimeout(resolve, ms)))]);
+    clearTimeout(timer);
+  }
+  const playable = () => library.filter((song) => !song.unavailable);
+  const notAvailableMessage = (song) => `"${song.title}" isn't available on YouTube`;
+
   // A queue item for a library song: straight from music/, or downloaded first
   // if it isn't there yet (run prefetch.py so that never happens on stage).
   async function libraryEntry(song, detail, { cancellable = false } = {}) {
     const title = `${song.artist} - ${song.title}`;
     const facts = { libraryId: song.id, bpm: song.bpm, genre: song.genre };
+    if (isEmbedSong(song)) return { title, detail, embed: true, videoId: song.id, ...facts, beat: song.beat };
+    if (song.hosted === true) return { title, detail, url: song.file, ...facts, hosted: true }; // real audio, no download step
     if (song.available !== false) return { title, detail, url: song.file, ...facts };
+    // The hosted site can't download: a song that isn't in music/ simply isn't available.
+    if (!(await loadConfig(apiBase)).youtube) throw new Error(`"${song.title}" isn't available`);
     const download = await downloadYouTube(`https://www.youtube.com/watch?v=${song.id}`, {
       title,
       detail: "Not in music/ yet (run prefetch.py), downloading",
@@ -439,12 +583,15 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   // with the music turned down. With nothing playing, it introduces the song first.
   // One at a time.
   async function transitionTo(item, { mixOutAt, startAt = null, style = null, hands = false } = {}) {
+    // Two YouTube songs crossfade; any other move into an embed (from a file, say) is a plain cut.
+    const embedMixing = embedMixable(item);
+    if (item.embed && !embedMixing) return void (await queue.play(item.id));
     const mine = ++transitionRun;
     const ownsTransition = () => mine === transitionRun;
     transitioning = true;
     transitionId = item.id;
     try {
-      const mixing = deck.playing && deck.buffer;
+      const mixing = embedMixing || Boolean(!item.embed && deck.playing && deck.buffer);
       const talks = djSpeaksBefore(item, mixing ? items.find((entry) => entry.id === currentId) : null);
       // Mix in from the playing song, or (nothing playing) just start, at the song's
       // entry with short mixes. Either way the DJ talks over the music, not before it.
@@ -483,7 +630,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     try {
       const current = items.find((item) => item.id === currentId);
       // The DJ only picks from the library (instant, nothing to download).
-      if (!library.length) throw new Error("the song library isn't loaded");
+      if (!library.length) throw new Error(libraryLoaded ? EMPTY_LIBRARY_MESSAGE : "the song library isn't loaded");
+      if (hostedEmbed) await checkedSoon();
+      if (!playable().length) throw new Error("no library song is available");
       const { picks } = await postJson("/dj/pick", {
         vibe: dj.vibe,
         nowPlaying: current?.title ?? "",
@@ -491,14 +640,14 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         crowd: dj.crowd,
         played,
         count: djPicksPerRequest,
-        library: library.map(({ id, artist, title, bpm, genre }) => ({ id, artist, title, bpm, genre })),
+        library: playable().map(({ id, artist, title, bpm, genre }) => ({ id, artist, title, bpm, genre })),
       });
       // Every pick gets ready at the same time; they join the queue in pick order.
       setDjStatus(`Getting ${picks.length} songs ready…`);
       const jobs = picks.map((pick) => {
         const label = `${pick.artist} - ${pick.title}`;
         const detail = `AI DJ · ${pick.reason}`;
-        const librarySong = library.find((song) => song.id === pick.id);
+        const librarySong = library.find((song) => song.id === pick.id && !song.unavailable);
         const song = librarySong ? libraryEntry(librarySong, detail) : Promise.reject(new Error("not in the library"));
         return song.then(
           (entryData) => ({ pick, label, entryData }),
@@ -543,7 +692,23 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   let coachSeen = 0;
   const coached = () => performance.now() - coachSeen < 4000; // a hiccup (a song decoding) mustn't hand a mix to the AI
   setInterval(() => {
-    if (!dj.on || transitioning || !deck.playing || !deck.buffer) return;
+    if (!dj.on || transitioning || embedMix) return;
+    if (embedActive()) {
+      // A YouTube song: a timed volume crossfade into the next YouTube song as this video nears its end.
+      // (Into anything else it just ends and the next item starts.)
+      const following = upcoming().find((item) => !loadFailed.has(item.id));
+      if (coached() || !following || !embedMixable(following) || !embed.isPlaying()) return;
+      const current = items.find((entry) => entry.id === currentId);
+      const beats = validBeat(current?.beat) && validBeat(following.beat);
+      const duration = embed.getDuration() || (beats ? current.beat.duration : 0) || 0;
+      // With beats the fade starts on a beat, up to one beat later than this moment: leave room for it, and
+      // count in real time (the video may play faster or slower).
+      const left = beats ? (duration - embed.getTime()) / nearestRate(deck.rate || 1) : duration - embed.getTime();
+      const lead = embedLeadSeconds + (beats ? 60 / current.beat.bpm : 0);
+      if (duration > 0 && left <= embedFadeSeconds() + lead) transitionTo(following);
+      return;
+    }
+    if (!deck.playing || !deck.buffer) return;
     // A song that failed to load isn't retried here every tick; the next one that hasn't failed is used.
     const next = upcoming().find((item) => !loadFailed.has(item.id));
     if (!next) return;
@@ -556,6 +721,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
   async function loadAndPlay(id, { mix = false, entry = false, request } = {}) {
     const item = items.find((entry) => entry.id === id);
     if (!item) return;
+    if (item.embed) return playEmbed(item, request, mix);
     loadingId = id;
     loadingRequest = request;
     changed();
@@ -583,6 +749,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         handMixStarted?.(mixed.hands);
       } else {
         // Same steps as Deck.loadArrayBuffer in audio.js, with the decoding already done.
+        stopEmbed(); // leaving a YouTube song is a plain cut
         transitions.cancel();
         deck.stopSource();
         deck.buffer = buffer;
@@ -601,8 +768,314 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     }
   }
 
+  // ---- YouTube embeds (hosted site) ---------------------------------------------------------
+  // An embed item plays in YouTube's own player (ytEmbed.js): volume and speed follow the hands, but
+  // there's no filter, effects, waveform or beat matching. Two embed items can blend (a level crossfade of the
+  // two players' volumes, driven by the hands or timed); any other move to or from one is a plain cut.
+  const embedActive = () => embedId !== null && (embedId === currentId || (embedMix !== null && embedMix.id === currentId));
+  const embedFadeSeconds = () => (dj.short ? shortBlendSeconds : blendSeconds);
+  // The player of the song that is current (during a blend, the incoming one).
+  const livePlayer = () => (embedMix ? embed.second : embed);
+  // Whether the item can come in under the playing YouTube song (both are embeds, a second player exists).
+  const embedMixable = (item) =>
+    Boolean(item?.embed && item.id !== currentId && !embedMix && embedActive() && canPair() && embed.isPlaying());
+  // Whether a hand blend (or a timed mix) can start into the item right now, for either kind of song.
+  const blendable = (item) => Boolean(item && item.id !== currentId && !transitioning && !embedMix && (
+    embedActive() ? embedMixable(item) : !item.embed && deck.playing && deck.buffer
+  ));
+
+  // The volumes of both players: the hands' volume (and the DJ's duck) times each player's blend level.
+  function applyEmbedVolume() {
+    if (embedId === null) return;
+    const base = handVolume * duckLevel;
+    embed.setVolume(base * (embedMix ? embedMix.outLevel : 1));
+    if (embedMix) embed.second.setVolume(base * embedMix.inLevel);
+  }
+
+  function stopEmbed() {
+    if (embedMix) {
+      clearTimeout(embedMix.timer);
+      embedMix = null;
+      embed.second.stop();
+    }
+    if (embedId === null) return;
+    embedId = null;
+    embed.stop();
+  }
+
+  // The blend lands: the outgoing player stops and the incoming one becomes the current player.
+  function landEmbedMix() {
+    const mix = embedMix;
+    if (!mix) return;
+    clearTimeout(mix.timer);
+    embedMix = null;
+    embed.stop(); // the old current player (it hides its frame)
+    embed.swap();
+    embedId = mix.id;
+    applyEmbedVolume();
+    changed();
+  }
+
+  // The incoming song is dropped (it failed, or was removed) and the outgoing one carries on alone.
+  function abortEmbedMix() {
+    const mix = embedMix;
+    if (!mix) return;
+    clearTimeout(mix.timer);
+    embedMix = null;
+    embed.second.stop();
+    if (currentId === mix.id) currentId = embedId;
+    requestedId = currentId;
+    applyEmbedVolume();
+    changed();
+  }
+
+  // Live controls with the same shape as transitions.mixInto's hands controls (index.html drives them
+  // with the hand height): the levels of the two players. A manual blend has no beats, bass swap or echo.
+  function embedMixControls(mix) {
+    const live = () => embedMix === mix && !mix.closing;
+    const level = (value) => Math.max(0, Math.min(1, Number.isFinite(value) ? value : 0));
+    const controls = {
+      style: "blend",
+      barSeconds: 2,
+      startsIn: 0,
+      get done() {
+        return embedMix !== mix;
+      },
+      setIncoming(value) {
+        if (!live()) return;
+        mix.inLevel = level(value);
+        applyEmbedVolume();
+      },
+      setOutgoing(value) {
+        if (!live()) return;
+        mix.outLevel = level(value);
+        applyEmbedVolume();
+      },
+      swapBass: () => null,
+      thinOutgoing() {},
+      echoOut: () => controls.finish(),
+      // Eases the incoming song to full and the outgoing one out over `seconds`, then lands the blend.
+      finish(seconds = 2) {
+        if (embedMix !== mix || mix.closing) return;
+        mix.closing = true;
+        const started = Date.now();
+        const from = { in: mix.inLevel, out: mix.outLevel };
+        const ms = Math.max(0, seconds * 1000);
+        const step = () => {
+          if (embedMix !== mix) return;
+          const share = ms === 0 ? 1 : Math.min(1, (Date.now() - started) / ms);
+          mix.inLevel = from.in + (1 - from.in) * share;
+          mix.outLevel = from.out * (1 - share);
+          applyEmbedVolume();
+          if (share >= 1) landEmbedMix();
+          else mix.timer = setTimeout(step, Math.min(100, ms / 4 || 100));
+        };
+        step();
+      },
+    };
+    return controls;
+  }
+
+  // The speed the incoming YouTube song starts at: the playing speed, matched to the outgoing song's tempo
+  // from the library bpm only when that is within what the deck would nudge (8%; double and half time count as
+  // the same tempo). The player then rounds to the nearest rate YouTube allows, so usually it stays at 1.
+  function incomingRate(from, to) {
+    const speed = deck.rate || 1;
+    if (!from?.bpm || !to?.bpm) return speed;
+    let ratio = from.bpm / to.bpm;
+    while (ratio > Math.SQRT2) ratio /= 2;
+    while (ratio < Math.SQRT1_2) ratio *= 2;
+    return Math.abs(ratio - 1) <= maxNudge ? speed * ratio : speed;
+  }
+
+  // Marks an embed item as failed with the reason and moves on to the next item, once. Never retries:
+  // asking to play it again is up to the user.
+  function failEmbed(item, reason, { moveOn = true } = {}) {
+    if (item.failed) return;
+    item.failed = reason;
+    loadFailed.add(item.id);
+    if (embedId === item.id) stopEmbed();
+    if (currentId === item.id) currentId = null;
+    status = { message: `"${item.title}" can't be played: ${reason}`, isError: true };
+    changed();
+    const next = items[items.findIndex((entry) => entry.id === item.id) + 1];
+    if (moveOn && next) queue.play(next.id);
+  }
+
+  // The incoming song of a blend can't be played: it's marked failed, the blend is dropped and the outgoing
+  // song carries on.
+  function failIncoming(item, reason) {
+    if (item.failed) return;
+    item.failed = reason;
+    loadFailed.add(item.id);
+    if (embedMix?.id === item.id) abortEmbedMix();
+    status = { message: `"${item.title}" can't be played: ${reason}`, isError: true };
+    changed();
+  }
+
+  // Hosted autoplay (see unlocked / needsStart). Called as a video is about to load: inside a click (the browser
+  // says the page has user activation) the players unlock at once, the second one primed; otherwise (a hand
+  // gesture, the AI DJ) the page is asked to show its "Start music" button. A browser that can't tell never gates.
+  function gateAutoplay(item) {
+    if (!hostedEmbed || unlocked) return;
+    const activation = typeof navigator === "undefined" ? null : navigator.userActivation;
+    if (!activation) unlocked = true;
+    else if (activation.isActive) {
+      unlocked = true;
+      primeSecond(item);
+    } else needsStart = true;
+  }
+  // Plays a muted video in the second player once (inside a click) so a later blend may start it by itself.
+  function primeSecond(item) {
+    if (!embed?.second || typeof embed.second.prime !== "function") return;
+    const following = items.slice(items.findIndex((entry) => entry.id === item.id) + 1).find((entry) => entry.embed && !entry.failed);
+    embed.second.prime((following ?? item).videoId);
+  }
+  // A video that has not started a few seconds after play() was refused autoplay: show "Start music" again.
+  // One that did start without any click needs no button.
+  function watchAutoplay(item) {
+    if (!hostedEmbed) return;
+    const timer = setTimeout(() => {
+      const player = embedMix?.id === item.id ? embed.second : embedId === item.id ? embed : null;
+      if (!player) return;
+      if (player.isPlaying() || player.getTime() >= 0.5) {
+        if (!unlocked && needsStart) {
+          needsStart = false;
+          changed();
+        }
+        return;
+      }
+      needsStart = true;
+      changed();
+    }, autoplayWatchMs);
+    timer?.unref?.();
+  }
+
+  async function playEmbed(item, request, mix = false) {
+    if (mix && embedActive() && canPair()) return playEmbedMix(item, request, mix);
+    loadingId = item.id;
+    loadingRequest = request;
+    item.failed = null;
+    loadFailed.delete(item.id);
+    changed();
+    try {
+      if (!embed) throw new Error("YouTube videos can't be played here");
+      gateAutoplay(item);
+      await embed.load(item.videoId);
+      if (request !== playRequest || !items.some((entry) => entry.id === item.id)) {
+        // Superseded while YouTube's player loaded: don't let it play over the newer choice.
+        const replaced = embedId; // the player's previous video, if an embed was playing, is gone now
+        embed.stop();
+        embedId = null;
+        if (replaced !== null && currentId === replaced) currentId = null;
+        return;
+      }
+      transitions.cancel();
+      deck.stopSource();
+      embedId = item.id;
+      currentId = item.id;
+      applyEmbedVolume();
+      embed.setRate(deck.rate || 1);
+      if (played.at(-1) !== item.title) played = [...played, item.title].slice(-50);
+      status = null;
+      watchAutoplay(item);
+      topUpDj();
+    } catch (error) {
+      if (request === playRequest) failEmbed(item, error.message);
+    } finally {
+      if (loadingId === item.id && loadingRequest === request) loadingId = null;
+      changed();
+    }
+  }
+
+  // Blends into an embed item under the playing one: the incoming song loads silent in the second player,
+  // then the hands (mix.hands) or a timed ramp move the two volumes. currentId is the incoming item from
+  // here, as on the deck; embedId stays the outgoing one until the blend lands.
+  async function playEmbedMix(item, request, mix) {
+    loadingId = item.id;
+    loadingRequest = request;
+    item.failed = null;
+    loadFailed.delete(item.id);
+    changed();
+    const outgoing = items.find((entry) => entry.id === currentId);
+    const outgoingEmbedId = embedId;
+    // Both songs know their beats (and the hands are not the ones mixing): the crossfade is beat-aligned.
+    const aligned = !mix.hands && validBeat(outgoing?.beat) && validBeat(item.beat);
+    const rateIn = incomingRate(outgoing, item);
+    try {
+      gateAutoplay(item);
+      await embed.second.load(item.videoId, aligned ? { volume: 0, rate: rateIn, start: item.beat.first } : { volume: 0, rate: rateIn });
+      if (request !== playRequest || !items.some((entry) => entry.id === item.id) || embedMix || embedId !== outgoingEmbedId || !embedActive()) {
+        embed.second.stop(); // superseded (or the outgoing song went away) while YouTube's player loaded
+        return;
+      }
+      const state = { id: item.id, inLevel: 0, outLevel: 1, timer: null, closing: false, controls: null };
+      state.controls = embedMixControls(state);
+      embedMix = state;
+      currentId = item.id;
+      if (played.at(-1) !== item.title) played = [...played, item.title].slice(-50);
+      status = null;
+      applyEmbedVolume();
+      console.info(`AI DJ ${mix.hands ? "hand " : ""}YouTube blend: ${outgoing?.title} → ${item.title}`);
+      handMixStarted?.(mix.hands ? state.controls : null);
+      watchAutoplay(item);
+      if (!mix.hands) {
+        if (aligned) {
+          // Put the incoming video where its beats meet the outgoing song's next beat, and begin the fade on it.
+          const plan = embedBeatPlan(outgoing.beat, item.beat, nearestRate(deck.rate || 1), nearestRate(rateIn), embed.getTime());
+          embed.second.seekTo(plan.seek);
+          state.timer = setTimeout(() => state.controls.finish(embedFadeSeconds()), plan.waitSeconds * 1000);
+        } else state.controls.finish(embedFadeSeconds());
+      }
+      topUpDj();
+    } catch (error) {
+      if (request === playRequest) {
+        item.failed = error.message;
+        loadFailed.add(item.id);
+        status = { message: `"${item.title}" can't be played: ${error.message}`, isError: true };
+      }
+    } finally {
+      if (loadingId === item.id && loadingRequest === request) loadingId = null;
+      changed();
+    }
+  }
+
+  if (embed) {
+    // The video ended: on to the next item that hasn't failed (not wrapping: a lone video doesn't replay forever).
+    // Mid-blend, the outgoing song ending just lands the blend.
+    embed.onEnded(() => {
+      if (embedMix) return void landEmbedMix();
+      if (!embedActive()) return;
+      const next = items.slice(currentIndex() + 1).find((item) => !item.failed);
+      if (next) queue.play(next.id);
+    });
+    // Embedding turned off, video removed, etc.: failed, and on to the next item once. Mid-blend, the
+    // outgoing song failing marks it failed and lets the incoming one carry on.
+    embed.onError((message) => {
+      const item = items.find((entry) => entry.id === embedId);
+      if (embedMix) {
+        if (item && !item.failed) {
+          item.failed = message;
+          loadFailed.add(item.id);
+          status = { message: `"${item.title}" can't be played: ${message}`, isError: true };
+        }
+        return void landEmbedMix();
+      }
+      if (item) failEmbed(item, message);
+    });
+    // The incoming song of a blend.
+    embed.second?.onError?.((message) => {
+      const item = items.find((entry) => entry.id === embedMix?.id);
+      if (item) failIncoming(item, message);
+    });
+    embed.second?.onEnded?.(() => {
+      if (embedMix) landEmbedMix();
+    });
+  }
+
   // Where the current song is, in seconds (0 when nothing is loaded).
   function position() {
+    if (embedActive()) return livePlayer().getTime();
     if (!deck.buffer) return 0;
     const seconds = deck.playing ? deck.position() : deck.offset;
     return Math.max(0, seconds % deck.buffer.duration);
@@ -617,27 +1090,31 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       loadingId,
       downloads,
       library,
+      libraryLoaded,
       status,
+      needsStart,
       dj: { on: dj.on, set: dj.set, vibe: dj.vibe, busy: dj.busy, talking: dj.talking, status: dj.status, short: dj.short },
     }),
 
     // Fast-changing playback state for progress bars; read it every frame.
-    getPlayback: () => ({
+    getPlayback: () => embedActive()
+      ? { position: livePlayer().getTime(), duration: livePlayer().getDuration(), playing: livePlayer().isPlaying(), loaded: true, rate: 1, songId: currentId, embed: true }
+      : {
       position: position(),
       duration: deck.buffer?.duration ?? 0,
       playing: Boolean(deck.playing),
       loaded: Boolean(deck.buffer),
       rate: deck.rate || 1, // song seconds per real second
       songId: currentId,
-    }),
+    },
 
     // The playing song's beat grid ({ bpm, first downbeat }, song seconds) around a point
     // in it, and how loud it is there (1 = its typical level). For djGame.js's charts.
-    beatGridAt: (seconds) => (deck.buffer ? transitions.beatGridAt(deck.buffer, seconds) : null),
-    energyAt: (seconds) => (deck.buffer ? transitions.energyAt(deck.buffer, seconds) : 1),
+    beatGridAt: (seconds) => (deck.buffer && !embedActive() ? transitions.beatGridAt(deck.buffer, seconds) : null),
+    energyAt: (seconds) => (deck.buffer && !embedActive() ? transitions.energyAt(deck.buffer, seconds) : 1),
 
     // Where (song seconds) the DJ mixes the playing song out by, or null with the DJ off.
-    mixOutAt: () => (dj.on && deck.buffer ? transitions.mixOutPoint(deck.buffer, dj.short) : null),
+    mixOutAt: () => (dj.on && deck.buffer && !embedActive() ? transitions.mixOutPoint(deck.buffer, dj.short) : null),
 
     // How the crowd (the player) is doing, 0–1: the DJ hears about it with its next picks.
     setCrowd(level) {
@@ -661,9 +1138,75 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       }
     },
 
+    // Whether something is playing right now (a YouTube song counts as well as the deck).
+    isPlaying: () => (embedActive() ? livePlayer().isPlaying() : Boolean(deck.playing)),
+    // Whether the current song plays in YouTube's player (no filter or effects there).
+    isEmbedActive: () => embedActive(),
+    // Whether a hand blend into this item could start now (the same kind of song on both sides).
+    canHandBlend: (item) => blendable(item),
+
+    // Whether YouTube links can be added as embedded videos (the page gave the queue a player).
+    supportsEmbed: Boolean(embed),
+
+    // A YouTube link for the embedded player (the hosted site; nothing is downloaded). Returns the
+    // item, or null with a status message for something that isn't a YouTube link. The title comes
+    // from the Worker's /api/youtube/info (YouTube's public oEmbed) and falls back to "YouTube video".
+    addYouTubeEmbed(link) {
+      const videoId = parseYouTubeId(link);
+      if (!videoId) {
+        setStatus(BAD_LINK_MESSAGE, true);
+        return null;
+      }
+      if (!embed) {
+        setStatus("YouTube videos can't be played here", true);
+        return null;
+      }
+      const entry = add({ embed: true, videoId, title: "YouTube video", detail: "YouTube" });
+      (async () => {
+        try {
+          const response = await fetch(`${apiBase}/youtube/info?id=${videoId}`);
+          const info = response.ok ? await response.json() : null;
+          if (typeof info?.title === "string" && info.title) {
+            entry.title = info.title;
+            entry.detail = info.author ? `YouTube · ${info.author}` : "YouTube";
+            changed();
+          }
+        } catch {
+          // The title is a nicety: the video still plays.
+        }
+      })();
+      return entry;
+    },
+
     addFile(file) {
       if (!file) return;
       add({ title: file.name.replace(/\.[^.]+$/, ""), detail: "File", file });
+    },
+
+    // The hosted site's "Start music" button (call it inside the click): unlocks BOTH YouTube players for autoplay
+    // (loads the current video, and plays a muted video in the second player once, so later blends can start by
+    // themselves) and starts playback. Returns whether there was a video to start.
+    startMusic() {
+      unlocked = true;
+      needsStart = false;
+      if (!embed) return changed(), false;
+      const wanted = (entry) => entry.embed && !entry.failed;
+      const target =
+        items.find((entry) => entry.id === currentId && wanted(entry)) ??
+        items.find((entry) => entry.id === requestedId && wanted(entry)) ??
+        items.find(wanted);
+      if (!target) {
+        changed();
+        return false;
+      }
+      primeSecond(target);
+      if (embedMix) embed.play?.();
+      else if (embedActive() && embedId === target.id && !embed.isPlaying()) {
+        embed.play(); // the video is loaded but never started
+        watchAutoplay(target);
+      } else if (!(embedActive() && embedId === target.id)) queue.play(target.id);
+      changed();
+      return true;
     },
 
     // Adds a library song (by its id), instantly from music/. playNow plays it right away.
@@ -671,6 +1214,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     async addFromLibrary(id, { playNow = false, autoplay = true } = {}) {
       const song = library.find((entry) => entry.id === id);
       if (!song) return;
+      if (song.unavailable) return void setStatus(notAvailableMessage(song), true);
       try {
         const entry = add(await libraryEntry(song, "Library"), { autoplay: autoplay && !playNow });
         if (playNow) queue.play(entry.id);
@@ -686,13 +1230,19 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       if (defaultQueueStarting) return defaultQueueStarting;
       defaultQueueStarting = (async () => {
         await libraryReady;
+        if (hostedEmbed) await checkedSoon();
         if (!items.length) {
-          if (!library.length) throw new Error("The default song library could not be loaded");
-          for (const song of library) add({
-            title: `${song.artist} - ${song.title}`, detail: "Default library",
-            libraryId: song.id, bpm: song.bpm, genre: song.genre, defaultLibrary: true,
-            url: song.available ? song.file : null,
-          }, { autoplay: false });
+          if (!library.length) throw new Error(libraryLoaded ? EMPTY_LIBRARY_MESSAGE : "The default song library could not be loaded");
+          if (hostedEmbed && !playable().length) throw new Error("No library song is available on YouTube right now");
+          // Hosted: start with the site's own tracks (effects work, mixes beat-match) when there are any, else the YouTube songs.
+          const starters = hostedEmbed ? (playable().some((song) => song.hosted === true) ? playable().filter((song) => song.hosted === true) : playable()) : library;
+          for (const song of starters) add(isEmbedSong(song)
+            ? { title: `${song.artist} - ${song.title}`, detail: "Default library", embed: true, videoId: song.id, libraryId: song.id, bpm: song.bpm, genre: song.genre, beat: song.beat }
+            : {
+              title: `${song.artist} - ${song.title}`, detail: "Default library",
+              libraryId: song.id, bpm: song.bpm, genre: song.genre, defaultLibrary: true,
+              url: song.available ? song.file : null,
+            }, { autoplay: false });
         }
         const first = items[0];
         await queue.play(first.id);
@@ -704,13 +1254,17 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Adds the whole library in order.
     async addAllFromLibrary() {
       await libraryReady;
+      if (hostedEmbed) await checkedSoon();
       // Added at once and lazily, like startDefaultQueue: uncached songs (url: null) download
       // only when decode() reaches them. The first one still autoplays, as before.
-      for (const song of library) add({
-        title: `${song.artist} - ${song.title}`, detail: "Library",
-        libraryId: song.id, bpm: song.bpm, genre: song.genre, defaultLibrary: true,
-        url: song.available !== false ? song.file : null,
-      });
+      // Hosted: the site's own tracks first (the library is already in that order), then the YouTube songs.
+      for (const song of hostedEmbed ? playable() : library) add(isEmbedSong(song)
+        ? { title: `${song.artist} - ${song.title}`, detail: "Library", embed: true, videoId: song.id, libraryId: song.id, bpm: song.bpm, genre: song.genre, beat: song.beat }
+        : {
+          title: `${song.artist} - ${song.title}`, detail: "Library",
+          libraryId: song.id, bpm: song.bpm, genre: song.genre, defaultLibrary: true,
+          url: song.available !== false ? song.file : null,
+        });
     },
 
     // Moves an item to a new position (0 = top).
@@ -731,6 +1285,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         requestedId = items[index - 1]?.id ?? null;
       }
       items = items.filter((entry) => entry.id !== id);
+      if (embedMix?.id === id) abortEmbedMix(); // the incoming song is gone: the outgoing one carries on
+      else if (embedMix && embedId === id) landEmbedMix(); // the outgoing song is gone: the blend lands
+      else if (embedId === id) stopEmbed(); // an embed can't keep playing unseen: it stops
       if (currentId === id) currentId = null;
       changed();
       topUpDj();
@@ -742,6 +1299,14 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     },
 
     togglePlay() {
+      if (embedActive()) {
+        cancelRequest();
+        cancelTransition();
+        if (embed.isPlaying()) embed.pause();
+        else embed.play();
+        changed();
+        return;
+      }
       if (!deck.buffer) {
         if (items.length) queue.play(items[0].id);
         return;
@@ -771,6 +1336,13 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
 
     // Jumps to a point in the current song (seconds).
     seek(seconds) {
+      if (embedActive() && Number.isFinite(seconds)) {
+        cancelRequest();
+        cancelTransition();
+        embed.seekTo(Math.max(0, seconds));
+        changed();
+        return;
+      }
       if (!deck.buffer || !Number.isFinite(seconds)) return;
       cancelEnding();
       cancelTransition();
@@ -809,7 +1381,8 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         libraryReady = loadLibrary();
         await libraryReady;
       }
-      if (!library.length) throw new Error("The song library could not load. Check the local server and try again.");
+      // empty: the library file loaded but lists no songs (djStart.js says so instead of showing a load error).
+      if (!library.length) throw Object.assign(new Error("The song library could not load. Check the local server and try again."), { empty: libraryLoaded });
     },
 
     // Resolves once the DJ's first song is picked and decoded, so it can start instantly
@@ -823,7 +1396,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         await new Promise((resolve) => setTimeout(resolve, 200));
       }
       if (gone()) throw cancelError();
-      await decode(items[0]);
+      if (!items[0].embed) await decode(items[0]);
     },
 
     // Starts the set the DJ prepared with startDj(vibe, { wait: true }).
@@ -850,12 +1423,13 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       await queue.libraryReady();
       if (request !== playRequest) return;
       transitions.cancel();
+      stopEmbed();
       deck.stopSource();
       currentId = null;
       requestedId = null;
       Object.assign(dj, { on: true, set: true, vibe: "", busy: false, waitToStart: true, status: null });
       dj.generation += 1;
-      const songs = ids.map((id) => library.find((song) => song.id === id)).filter(Boolean);
+      const songs = ids.map((id) => library.find((song) => song.id === id)).filter((song) => song && !song.unavailable);
       items = [];
       songs.forEach((song, index) => {
         add(
@@ -887,6 +1461,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       playRequest += 1;
       abortSetDownloads();
       cancelTransition();
+      stopEmbed();
       deck.stopSource();
       Object.assign(dj, { on: false, set: false, busy: false, waitToStart: false, status: null });
       dj.generation += 1;
@@ -917,6 +1492,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       if (request !== playRequest) return false;
       endingRequest = null;
       transitions.cancel();
+      stopEmbed();
       deck.stopSource();
       currentId = null;
       requestedId = null;
@@ -952,10 +1528,16 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // Mixes into the next song right away, on the next downbeat (the coach uses it).
     // Returns whether there was a song to mix into.
     mixNow() {
+      if (embedMix) {
+        landEmbedMix(); // a second press lands the blend
+        return true;
+      }
       if (transitioning) return false;
       const next = upcoming()[0] ?? items[0];
       if (!next || next.id === currentId) return false;
-      if (!deck.playing || !deck.buffer) {
+      if (embedMixable(next)) {
+        transitionTo(next); // a timed crossfade (8 s, or the short mixes' 4 s)
+      } else if (!deck.playing || !deck.buffer || next.embed) {
         deck.ensureContext();
         queue.play(next.id);
       } else {
@@ -976,7 +1558,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
     // style: "blend" or "cut" to insist on one.
     startHandMix({ startAt = null, style = null } = {}) {
       const next = upcoming()[0] ?? items[0];
-      if (transitioning || !next || next.id === currentId || !deck.playing || !deck.buffer) return Promise.resolve(null);
+      if (!blendable(next)) return Promise.resolve(null);
       return new Promise((resolve) => {
         const started = (controls) => {
           if (handMixStarted === started) handMixStarted = null;
@@ -1048,7 +1630,9 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       // While mixing (the AI's or the hands'), it's about the song coming in, and only that
       // song: if it was removed mid-mix, this is the normal state (the playing song is the one going out).
       // Once a hand mix has landed, the song coming in is the playing one.
-      const incoming = transitioning
+      const incoming = embedMix
+        ? items.find((entry) => entry.id === embedMix.id)
+        : transitioning
         ? items.find((entry) => entry.id === transitionId)
         : handMix && !handMix.done
           ? items.find((entry) => entry.id === currentId)
@@ -1056,6 +1640,7 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
       const mixing = Boolean(incoming);
       const next = incoming ?? upcoming()[0];
       if (!next) return null;
+      const current = items.find((entry) => entry.id === currentId);
       const preview = {
         item: next,
         mixing,
@@ -1067,8 +1652,17 @@ export function createQueue(deck, { apiBase = "/api", libraryUrl = "library.json
         beatSeconds: null,
         short: dj.short,
       };
+      if (embedActive()) {
+        // A YouTube song: the AI DJ's crossfade starts as the video nears its end.
+        const duration = embed.getDuration() || (validBeat(current?.beat) ? current.beat.duration : 0) || 0;
+        const left = duration - embed.getTime();
+        if (dj.on && !mixing && duration > 0) {
+          preview.secondsToMix = Math.max(0, left - embedFadeSeconds() - embedLeadSeconds);
+          preview.secondsToOut = Math.max(0, left);
+        }
+        return preview;
+      }
       if (!deck.buffer || !deck.playing) return preview;
-      const current = items.find((entry) => entry.id === currentId);
       const buffer = ready.get(next.id);
       if (buffer && !mixing) {
         preview.style = transitions.styleInto(buffer, {
@@ -1196,8 +1790,25 @@ const styles = `
 .queuePanel-library[open] summary::before { content: "▾"; }
 .queuePanel-library summary span { flex: 1; }
 .queuePanel-library .queuePanel-list { margin-top: 6px; }
+.queuePanel-group { list-style: none; margin: 6px 0 0; padding: 0 2px; font-size: 11px; font-weight: 700; letter-spacing: .04em; text-transform: uppercase; color: #8a4510; }
+.queuePanel-credits { border-top: 1px solid var(--border); padding-top: 8px; font-size: 12px; }
+.queuePanel-credits summary { cursor: pointer; font-weight: 600; }
+.queuePanel-credits ul { margin: 6px 0 0; padding-left: 18px; display: flex; flex-direction: column; gap: 4px; }
+.queuePanel-credits a { color: inherit; }
 .queuePanel-row.librarySong { cursor: default; }
+.queuePanel-row.unavailable { background: rgba(120,130,138,.14); }
+.queuePanel-row.unavailable strong, .queuePanel-row.unavailable small { color: #4f5b63; text-decoration: none; } /* grey, still 4.5:1 on the glass */
+.queuePanel-row.unavailable button { opacity: .5; cursor: not-allowed; }
 .queuePanel-row.missing small { color: #7a3f08; } /* a dark orange: --between is about 2.5:1 on cream, and #94500f misses AA on the glass */
+.queuePanel-embed { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
+.queuePanel-embed[hidden] { display: none; }
+.queuePanel-embed input[type="text"] {
+  flex: 1; min-width: 0; padding: 7px 10px; font: inherit; font-size: 13px;
+  color: var(--text); background: var(--bg); border: 1px solid var(--border); border-radius: 8px;
+}
+.queuePanel-embedLabel { font-size: 12px; font-weight: 600; color: var(--muted); }
+.queuePanel-embed .queuePanel-add { flex-wrap: wrap; }
+.queuePanel-embed a { font-size: 12px; color: #0a4f8a; text-decoration: underline; }
 .queuePanel-beta { display: flex; flex-direction: column; gap: 6px; padding-top: 8px; border-top: 1px solid var(--border); }
 .queuePanel-betaLabel { font-size: 12px; font-weight: 600; color: var(--muted); }
 .queuePanel-betaLabel b { color: #8a4510; }
@@ -1456,7 +2067,22 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   const libraryList = element("ol", { className: "queuePanel-list", "aria-label": "Song library" });
   const libraryCount = element("span", { text: "Library" });
   let libraryKey = "";
+  let hostedSite = false; // the hosted site: library songs may be YouTube embeds (no effects) or hosted audio
+  const creditsList = element("ul", { "aria-label": "Music credits" });
+  const credits = element("details", { className: "queuePanel-credits", hidden: "" }, [element("summary", { text: "Music credits" }), creditsList]);
+  let youtube = true; // false on the hosted site (see loadConfig): no YouTube box, no downloads
+  // The hosted site's YouTube links: played in YouTube's own embedded player (see ytEmbed.js).
+  const embedInput = element("input", { type: "text", placeholder: "https://www.youtube.com/watch?v=…", "aria-label": "Paste a YouTube link" });
+  const embedBlock = element("div", { className: "queuePanel-embed", hidden: "" }, [
+    element("span", { className: "queuePanel-embedLabel", text: "Paste a YouTube link" }),
+    element("div", { className: "queuePanel-add" }, [
+      embedInput,
+      element("button", { type: "button", text: "Add", onClick: addEmbedFromInput }),
+    ]),
+    element("a", { href: "https://www.youtube.com", target: "_blank", rel: "noopener", text: "Search on YouTube" }),
+  ]);
   const fileInput = element("input", { type: "file", accept: "audio/*,video/mp4" });
+  const addButton = element("button", { type: "button", text: "Add", onClick: addFromInput });
   const status = element("p", { className: "queuePanel-status", role: "status", "aria-live": "polite", hidden: "" });
   const vibeInput = element("input", { type: "text", placeholder: "DJ vibe, e.g. chill house into hype EDM", "aria-label": "DJ vibe" });
   const djButtons = element("span", { className: "queuePanel-actions" });
@@ -1484,6 +2110,11 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     input.value = "";
   }
   input.addEventListener("keydown", (event) => event.key === "Enter" && addFromInput());
+  function addEmbedFromInput() {
+    deck.ensureContext(); // inside the click, so YouTube's player may start with sound
+    if (queue.addYouTubeEmbed(embedInput.value)) embedInput.value = "";
+  }
+  embedInput.addEventListener("keydown", (event) => event.key === "Enter" && addEmbedFromInput());
 
   // Start (or, with the DJ on, change the vibe). Inside the click so the DJ's first song can play.
   function startOrChangeVibe() {
@@ -1538,15 +2169,17 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
       ]),
       libraryList,
     ]),
+    credits,
     list,
     empty,
     status,
+    embedBlock,
     // The beta alternative: any song from YouTube (slow), or a file.
     element("div", { className: "queuePanel-beta" }, [
       element("span", { className: "queuePanel-betaLabel" }),
       element("div", { className: "queuePanel-add" }, [
         input,
-        element("button", { type: "button", text: "Add", onClick: addFromInput }),
+        addButton,
         element("button", {
           type: "button",
           className: "secondary",
@@ -1564,6 +2197,18 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   // "Beta" label with its warning (built here because it mixes bold and plain text).
   const betaLabel = panel.querySelector(".queuePanel-betaLabel");
   betaLabel.append(element("b", { text: "Beta: " }), "any song from YouTube. Downloads can take 10–30 seconds.");
+  // Without YouTube (the hosted site) only "add a file" stays.
+  loadConfig().then((config) => {
+    youtube = config.youtube;
+    embedBlock.hidden = !(config.youtubeEmbed && queue.supportsEmbed);
+    hostedSite = config.hosted && config.youtubeEmbed;
+    render(); // short mixes cut decoded audio: shown again once audio items exist (see render)
+    if (youtube) return;
+    input.hidden = true;
+    addButton.hidden = true;
+    betaLabel.textContent = "Add an audio file from your computer.";
+    render();
+  });
   if (embedded) {
     panel.classList.add("queuePanel-embedded");
     panel.setAttribute("role", "region");
@@ -1579,7 +2224,8 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
       element("summary", { text: "AI DJ & import" }),
       element("div", { className: "queuePanel-toolsBody" }, [djRow, djOptions, djStatus, panel.querySelector(".queuePanel-beta")]),
     ]);
-    library.after(tools);
+    library.after(embedBlock, tools);
+    tools.after(credits);
   }
   document.body.append(panel);
 
@@ -1618,14 +2264,14 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   function row(item, index, state) {
     const isCurrent = item.id === state.currentId;
     const isLoading = item.id === state.loadingId;
-    const classes = ["queuePanel-row", isCurrent && "current", item.dj && "fromDj"].filter(Boolean).join(" ");
+    const classes = ["queuePanel-row", isCurrent && "current", item.dj && "fromDj", item.failed && "failed"].filter(Boolean).join(" ");
     const handle = element("span", { className: "queuePanel-handle", title: "Drag to reorder", "aria-hidden": "true", text: "⋮⋮" });
     const entry = element("li", { className: classes, tabindex: "0", "aria-label": `${index + 1} of ${state.items.length}: ${item.title}`, "data-id": String(item.id), "aria-keyshortcuts": "Alt+ArrowUp Alt+ArrowDown" }, [
       handle,
       element("span", { className: "queuePanel-number", text: String(index + 1) }),
       element("div", { className: "queuePanel-track" }, [
         element("strong", { text: item.title }),
-        element("small", { text: isLoading ? "Loading…" : isCurrent ? "Now playing" : item.detail }),
+        element("small", { text: isLoading ? "Loading…" : item.failed ? `Can't play: ${item.failed}` : isCurrent ? "Now playing" : item.detail }),
         ...(isLoading ? [progressBar(null)] : []),
       ]),
       element("div", { className: "queuePanel-actions" }, [
@@ -1704,11 +2350,12 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
   // A library song: name and artist, ▶ to play it now, + to add it to the queue.
   function libraryRow(song) {
     const missing = song.available === false;
-    return element("li", { className: `queuePanel-row librarySong ${missing ? "missing" : ""}` }, [
+    const gone = song.unavailable === true; // hosted: YouTube no longer plays this video in an embed
+    return element("li", { className: `queuePanel-row librarySong ${missing ? "missing" : ""} ${gone ? "unavailable" : ""}`.trim(), ...(gone ? { "aria-disabled": "true" } : {}) }, [
       element("div", { className: "queuePanel-track" }, [
         element("strong", { text: song.title }),
         element("small", {
-          text: [song.artist, song.bpm && `${song.bpm} BPM`, missing && "not in music/ yet (run prefetch.py)"]
+          text: [song.artist, song.bpm && `${song.bpm} BPM`, gone ? "Not available on YouTube" : missing && (youtube ? "not in music/ yet (run prefetch.py)" : "not available")]
             .filter(Boolean)
             .join(" · "),
         }),
@@ -1719,6 +2366,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
           title: "Play now",
           "aria-label": `Play ${song.title} now`,
           text: "▶",
+          ...(gone ? { disabled: "" } : {}),
           onClick: () => {
             deck.ensureContext();
             queue.addFromLibrary(song.id, { playNow: true });
@@ -1730,6 +2378,7 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
           title: "Add to the queue",
           "aria-label": `Add ${song.title} to the queue`,
           text: "+",
+          ...(gone ? { disabled: "" } : {}),
           onClick: () => {
             deck.ensureContext();
             queue.addFromLibrary(song.id);
@@ -1764,22 +2413,48 @@ export function createQueuePanel(queue, deck, { embedded = false } = {}) {
     const state = queue.getState();
     // Song rows: only rebuilt when something about them changed, so buttons
     // don't get replaced mid-click while downloads tick.
-    const key = JSON.stringify([state.items.map((item) => item.id), state.currentId, state.loadingId]);
+    const key = JSON.stringify([state.items.map((item) => [item.id, item.title, item.detail, item.failed ?? null]), state.currentId, state.loadingId]);
     if (draggedId === null && key !== rowsKey) {
       rowsKey = key;
       list.replaceChildren(...state.items.map((item, index) => row(item, index, state)));
     }
     empty.hidden = state.items.length > 0 || state.downloads.length > 0;
-    const newLibraryKey = JSON.stringify(state.library.map((song) => [song.id, song.available]));
+    const newLibraryKey = JSON.stringify([youtube, state.libraryLoaded, state.library.map((song) => [song.id, song.available, song.unavailable === true, song.hosted === true, song.attribution ?? null])]);
     if (newLibraryKey !== libraryKey) {
       libraryKey = newLibraryKey;
-      libraryList.replaceChildren(...state.library.map(libraryRow));
+      // Two kinds on the hosted site: tracks with audio (effects work) first, then the YouTube songs (no effects).
+      const groups = state.library.some((song) => song.hosted === true);
+      const rows = [];
+      state.library.forEach((song, index) => {
+        if (groups && (index === 0 || (song.hosted === true) !== (state.library[index - 1].hosted === true))) {
+          rows.push(element("li", { className: "queuePanel-group", "aria-hidden": "true", text: song.hosted === true ? "Full effects" : "YouTube · no effects" }));
+        }
+        rows.push(libraryRow(song));
+      });
+      libraryList.replaceChildren(
+        ...(state.library.length || !state.libraryLoaded
+          ? rows
+          : [element("li", { className: "queuePanel-empty", text: EMPTY_LIBRARY_MESSAGE })]),
+      );
+      // The licence (CC BY) asks for the credit: every library song that carries one.
+      const credited = state.library.filter((song) => typeof song.attribution === "string" && song.attribution.trim());
+      credits.hidden = credited.length === 0;
+      creditsList.replaceChildren(...credited.map((song) => {
+        const link = typeof song.licenseUrl === "string" && /^https?:\/\//.test(song.licenseUrl) && song.license;
+        return element("li", {}, [
+          song.attribution,
+          ...(link ? [" · ", element("a", { href: song.licenseUrl, target: "_blank", rel: "noopener noreferrer", text: song.license })] : song.license ? [` · ${song.license}`] : []),
+        ]);
+      }));
       libraryCount.textContent = `Library · ${state.library.length} songs`;
     }
     downloadsList.replaceChildren(...state.downloads.map(downloadRow));
     status.hidden = !state.status;
     status.textContent = state.status?.message ?? "";
     status.classList.toggle("error", Boolean(state.status?.isError));
+
+    // Short mixes cut decoded audio: hidden on the hosted site only while nothing there is audio.
+    djOptions.style.display = hostedSite && !state.library.some((song) => song.hosted === true) && !state.items.some((item) => !item.embed) ? "none" : "";
 
     const { dj } = state;
     djRow.classList.toggle("on", dj.on);

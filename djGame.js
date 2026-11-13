@@ -13,6 +13,9 @@
 // Hitting the shapes is how a good DJ would move right then; your hands really set the
 // filter and volume, so missing them sounds like it.
 //
+// Hosted (queue.hasEffects === false, a YouTube player with only volume): no filter shapes are charted
+// (no build-ups that close the pinch) and the right pinch's openness is not judged.
+//
 // You pick the set before you play (queue.playSet); the mixes are part of the chart:
 //   - Blend (tempos close): your right thumb and index slide the new song in along a
 //     track, then your left ones slide the old song out. Not following? The AI does it.
@@ -100,6 +103,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
   const songShares = new Map(); // song id → how far through it the bar has got (never goes back)
 
   let enabled = startEnabled;
+  let destroyed = false;
   let generation = 0; // pending set endings belong to the game that created them
   let wasActive = false;
   let lastFrame = 0;
@@ -108,6 +112,8 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
   // Your fingertips, in stage pixels: { left: { thumb, index } | null, right: ... }.
   const tips = { left: null, right: null };
   const palms = { left: null, right: null }; // each hand's palm size (stage px), as last seen
+  // Whether the sound has a filter to play with. False on the hosted site, where nothing would change.
+  const hasFilter = () => queue.hasEffects !== false;
 
   // The chart: shapes by key, generated a little ahead of the music.
   const shapes = new Map();
@@ -254,7 +260,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
         continue;
       }
       const away = distance(middle(hand), point(pin.at)) / size().height;
-      const pinchOff = side === "left" || hand.pinch === undefined ? 0 : Math.abs(hand.pinch - Math.min(1, pin.pinch));
+      const pinchOff = side === "left" || hand.pinch === undefined || !hasFilter() ? 0 : Math.abs(hand.pinch - Math.min(1, pin.pinch));
       if (away <= reach && pinchOff <= pinchTolerance) hit[side] = "on";
       else if (away <= mercyReach && pinchOff <= mercyPinchTolerance) hit[side] = "near";
       else hit[side] = false;
@@ -337,7 +343,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
       const quiet = energy < 0.6;
       const loud = energy > 1.15;
       // The two bars before a jump are a build-up: the filter closes over them.
-      const buildUp = !drop && ahead > Math.max(1, energy * 1.3);
+      const buildUp = hasFilter() && !drop && ahead > Math.max(1, energy * 1.3);
       const lastBarOfBuild = buildUp && queue.energyAt(downbeat + bar * 1.5) > Math.max(1, energy * 1.3);
       // Room to breathe: a shape a bar in normal parts (two every other bar), two in loud
       // ones, and one every other bar when it's quiet.
@@ -837,6 +843,7 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
   }
 
   function draw() {
+    if (destroyed) return; // the page dropped this game (it switched engines): the loop ends
     requestAnimationFrame(draw);
     const now = pausedAt ?? performance.now(); // paused: everything holds still
     const { width, height } = size();
@@ -923,6 +930,17 @@ export function createDjGame(queue, { stage, camera, rail, deck, startEnabled = 
 
   return {
     update,
+    // Drops the game: its frame loop ends and its canvas, set card and progress bar leave the page
+    // (the page builds a new game for the next engine). Safe to call twice.
+    destroy() {
+      if (destroyed) return;
+      destroyed = true;
+      generation += 1; // a pending finale must not report results
+      enabled = false;
+      canvas.remove?.();
+      card.remove();
+      progress.remove();
+    },
     // Turns the game on or off (the start screen turns it on at "Go").
     setEnabled(on) {
       enabled = on;
@@ -1007,6 +1025,7 @@ function buildCard(queue, rail) {
 
   let last = "";
   return {
+    remove: () => card.remove?.(),
     render(score, enabled) {
       const { items, currentId } = queue.getState();
       const playing = items.findIndex((item) => item.id === currentId);
@@ -1040,6 +1059,7 @@ function buildProgress(stage) {
   stage.append(bar);
   let segments = [];
   return {
+    remove: () => bar.remove?.(),
     render(songs, { song = 0, songs: count = 0 } = {}) {
       bar.hidden = !songs;
       if (!songs) return;

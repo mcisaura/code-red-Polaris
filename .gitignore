@@ -4,3 +4,7 @@ __pycache__/
 .claude/
 music/
 .env
+dist/
+node_modules/
+.wrangler/
+public-music/

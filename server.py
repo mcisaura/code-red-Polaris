@@ -452,6 +452,14 @@ def is_progress_path(url):
         return False
 
 
+def is_config_path(url):
+    """True when url's path (before any query string) is exactly /api/config."""
+    try:
+        return urlsplit(url).path == "/api/config"
+    except ValueError:
+        return False
+
+
 def is_this_server(url):
     """True when url (a Host header value or an Origin) is http://<this server>:<PORT>.
     Only localhost, 127.0.0.1 and AIRDECK_HOST count as this server's names."""
@@ -559,6 +567,11 @@ class Handler(SimpleHTTPRequestHandler):
             with progress_lock:
                 state = progress.get(job)
             return self.send_json(200, state or {"stage": "unknown"})
+        if is_config_path(self.path):
+            # What this server can do, so the pages adapt (the hosted Worker answers youtube: false).
+            if not self.api_allowed():
+                return self.send_json(403, {"error": "forbidden origin"})
+            return self.send_json(200, {"youtube": True, "youtubeEmbed": False, "hosted": False})
         super().do_GET()
 
     def log_message(self, format, *args):

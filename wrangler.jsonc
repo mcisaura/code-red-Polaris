@@ -1,0 +1,19 @@
+{
+  "$schema": "./node_modules/wrangler/config-schema.json",
+  "name": "airdeck",
+  "main": "worker/worker.js",
+  // Must not be newer than the workerd bundled with the installed wrangler.
+  "compatibility_date": "2026-11-10",
+  "assets": {
+    // Built by `npm run build` (scripts/build-site.mjs): only the site's public files.
+    "directory": "./dist",
+    "binding": "ASSETS",
+    // The Worker handles every request first (/ and /api/*) and falls back to env.ASSETS.
+    "run_worker_first": true,
+    // Serve files exactly as named (/index.html stays /index.html, no redirects to clean URLs).
+    "html_handling": "none"
+  },
+  // Hosted audio (library.public.json): create once with `npx wrangler r2 bucket create airdeck-music`,
+  // fill with `npm run upload-music`. The Worker serves /music/<id>.m4a from it.
+  "r2_buckets": [{ "binding": "MUSIC", "bucket_name": "airdeck-music" }]
+}

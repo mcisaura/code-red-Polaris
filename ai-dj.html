@@ -93,6 +93,15 @@
   .song .actions { display: flex; gap: 8px; margin-top: 8px; flex-wrap: wrap; }
   .song input[type="file"] { display: none; }
   .muted { color: var(--muted); }
+  #ytMount { padding: 14px 16px; }
+  #ytMount[hidden] { display: none; }
+  #ytMount .ytCard-title { margin: 0 0 8px; font-size: 12px; font-weight: 800; letter-spacing: 0.08em; color: #8a4510; }
+  #ytMount .ytCard-frame { width: 100%; height: 200px; min-width: 200px; border-radius: 14px; box-shadow: 0 0 0 2px rgba(255,255,255,.95), 0 4px 14px rgba(150,70,20,.25); }
+  #ytMount .ytCard-note { margin: 8px 0 0; font-size: 12px; color: #5a3519; }
+  .credits { padding: 10px 16px; font-size: 12px; color: #8a4510; }
+  .credits[hidden] { display: none; }
+  .credits summary { cursor: pointer; font-weight: 800; letter-spacing: 0.04em; }
+  .credits ul { margin: 8px 0 0; padding-left: 18px; line-height: 1.4; overflow-wrap: anywhere; }
   .help { color: var(--muted); font-size: 13px; margin: 0; padding: 12px 14px; border-radius: 18px; }
   .help b { color: var(--text); }
 </style>
@@ -115,6 +124,8 @@
   </div>
 
   <aside>
+    <!-- Hosted only: YouTube's player, visible while it plays (ytEmbed.js fills and shows it). -->
+    <div id="ytMount" class="card glass" hidden></div>
     <div class="card glass song">
       <h2><span>Song</span></h2>
       <div class="setButtons">
@@ -124,6 +135,11 @@
       <div id="songStatus">Pick your songs to start.</div>
     </div>
     <div id="djSet" style="display: contents"></div>
+    <!-- Music credits: the attribution of library songs that have one (CC BY). Hidden when there are none. -->
+    <details id="credits" class="card glass credits" hidden>
+      <summary>Music credits</summary>
+      <ul id="creditsList"></ul>
+    </details>
     <!-- The per-hand debug readouts stay out of AirMix's rail (they still update, hidden). -->
     <div id="cards" hidden></div>
     <div class="card glass between">
@@ -137,7 +153,9 @@
 
 <script type="module">
 import { Deck } from "./aiDeck.js";
-import { createQueue } from "./queue.js";
+import { createQueue, loadConfig } from "./queue.js";
+import { createYtEmbed, loadYouTubeApi } from "./ytEmbed.js";
+import { createYtSession } from "./ytDeck.js";
 import { createDjGame } from "./djGame.js";
 import { createStartScreen } from "./djStart.js";
 
@@ -221,7 +239,21 @@ const $ = (id) => document.getElementById(id);
 
 let landmarker;
 let lastVideoTime = -1;
-const deck = new Deck();
+// The hosted site (Cloudflare) can't download audio. It lists two kinds of songs: `hosted: true` songs with real
+// audio (they play on the full engine, like the local game: Deck + createQueue) and YouTube songs, which play in
+// YouTube's own embedded player (ytDeck.js: beats only). The engine is chosen per set, at Play (useEngine below).
+// Locally every set is the full engine. A slow or failed /api/config counts as local.
+const config = await Promise.race([loadConfig(), new Promise((resolve) => setTimeout(resolve, 4000, { hosted: false, youtubeEmbed: false }))]);
+const hostedSite = config.hosted === true && config.youtubeEmbed === true;
+// Hosted only: lists the library for the picker and checks YouTube songs. It has no player (no mount) and never plays.
+const catalog = hostedSite ? createYtSession({ embed: createYtEmbed({ mount: null }), loadApi: loadYouTubeApi }) : null;
+catalog?.warm(); // YouTube's script loads now, so the Play click can start a video at once
+// The engine playing the current set: { kind: "full" | "yt", deck, queue, game, embed, off }. deck, queue and djGame
+// always point at it (null before the first Play).
+let engine = null;
+let deck = null;
+let queue = null;
+let djGame = null;
 const controls = { speed: 1, freq: FREQ_OFF, volume: 0.8 };
 // Each hand's control as a 0–1 knob: left = speed (0.5 = 1.0×), right = filter (1 = open)
 const knobs = { left: 0.5, right: 1 };
@@ -567,7 +599,7 @@ function update(result, now) {
   }
   const live = (side) => (now - sides[side].lastSeen < HOLD_MS ? sides[side].hand : null);
   const left = live("left"), right = live("right");
-  djGame.update({ left, right }, now); // the set as a rhythm game: your hands do the mixes (djGame.js)
+  djGame?.update({ left, right }, now); // the set as a rhythm game: your hands do the mixes (djGame.js)
 
   let between = null;
   if (left && right) {
@@ -584,9 +616,11 @@ function update(result, now) {
   controls.speed = Math.abs(speed - 1) < SPEED_DETENT ? 1 : speed;
   controls.freq = knobs.right === 1 ? FREQ_OFF : FREQ_MIN * Math.pow(FREQ_MAX / FREQ_MIN, knobs.right);
   if (between) controls.volume = deadband(controls.volume, between.value, DEADBAND / 2);
-  deck.setSpeed(controls.speed);
-  deck.setFrequency(controls.freq);
-  deck.setVolume(controls.volume);
+  if (deck) {
+    deck.setSpeed(controls.speed);
+    deck.setFrequency(controls.freq);
+    deck.setVolume(controls.volume);
+  }
   updateControls();
 
   draw(left, right, between);
@@ -677,8 +711,10 @@ function draw(left, right, between) {
 
   if (left) drawHand(left, COLORS.left);
   if (right) drawHand(right, COLORS.right);
-  drawKnobMeter("left", 24, COLORS.left, `speed ${shownSpeed().toFixed(2)}×`);
-  drawKnobMeter("right", canvas.width - 40, COLORS.right, `filter ${formatHz(controls.freq)}`);
+  if (queue?.hasEffects !== false) { // a YouTube set's player has no speed or filter, so no meters for them
+    drawKnobMeter("left", 24, COLORS.left, `speed ${shownSpeed().toFixed(2)}×`);
+    drawKnobMeter("right", canvas.width - 40, COLORS.right, `filter ${formatHz(controls.freq)}`);
+  }
 
   if (between) {
     drawWaveform(left.mid, right.mid);
@@ -690,7 +726,7 @@ function draw(left, right, between) {
 // The line between the hands is the live audio waveform, bent along the line.
 // It's flat when nothing is playing and grows with the volume.
 function drawWaveform(a, b) {
-  const data = deck.waveform();
+  const data = deck?.waveform() ?? null;
   const dx = b.x - a.x, dy = b.y - a.y;
   const len = Math.hypot(dx, dy) || 1;
   const nx = -dy / len, ny = dx / len; // unit normal to the line
@@ -815,7 +851,7 @@ const formatHz = (hz) => (hz >= 1000 ? (hz / 1000).toFixed(1) + " kHz" : Math.ro
 
 // The playback speed as the audio runs it: during a set it's held at 1.00× (djGame.js), so the
 // label follows the deck rather than the left hand's knob.
-const shownSpeed = () => (typeof deck.rate === "number" ? deck.rate : controls.speed);
+const shownSpeed = () => (typeof deck?.rate === "number" ? deck.rate : controls.speed);
 
 function updateControls() {
   $("leftControl").textContent = shownSpeed().toFixed(2) + "×";
@@ -841,44 +877,137 @@ function updateFps(now) {
 // You pick the set on the start screen (djStart.js); the queue (queue.js) plays exactly
 // those songs, and the game (djGame.js) is how you mix them.
 const songStatus = $("songStatus");
-const queue = createQueue(deck);
-
-// The set as a rhythm game over the camera view, plus its card in the rail (djGame.js).
+// The set as a rhythm game over the camera view, plus its card in the rail (djGame.js). One game per engine.
 const stage = document.querySelector(".stage");
-const djGame = createDjGame(queue, {
-  stage,
-  camera: canvas,
-  rail: $("djSet"),
-  deck,
-  startEnabled: false,
-  // The pinch calibration and control ranges, so the game's targets mean real sounds.
-  controlMap: () => ({
-    pinchClosed: PINCH_CLOSED,
-    pinchOpen: PINCH_OPEN,
-    freqMin: FREQ_MIN,
-    freqMax: FREQ_MAX,
-    betweenClosed: BETWEEN_CLOSED,
-    betweenOpen: BETWEEN_OPEN,
-  }),
-  onSetEnd: (results) => {
-    if (djGame.paused) djGame.reset(); // results always come from a clean, unpaused state
-    cameraLost = false;
-    inSet = false;
-    phase = "playing";
-    updateSetButtons();
-    screens.results(results);
-  },
-});
+const ytMount = $("ytMount");
+const ytNote = "The video has to stay visible while the music plays.";
+
+// Builds the engine for a kind of set: the full one (the local game: Deck + createQueue) or the YouTube one.
+function buildEngine(kind) {
+  let engineDeck, engineQueue, embed = null;
+  if (kind === "yt") {
+    embed = createYtEmbed({ mount: ytMount });
+    const note = ytMount.querySelector(".ytCard-note");
+    if (note) note.textContent = ytNote;
+    const session = createYtSession({ embed, loadApi: loadYouTubeApi });
+    engineDeck = session.deck;
+    engineQueue = session.queue;
+  } else {
+    engineDeck = new Deck();
+    engineQueue = createQueue(engineDeck);
+  }
+  const game = createDjGame(engineQueue, {
+    stage,
+    camera: canvas,
+    rail: $("djSet"),
+    deck: engineDeck,
+    startEnabled: false,
+    // The pinch calibration and control ranges, so the game's targets mean real sounds.
+    controlMap: () => ({
+      pinchClosed: PINCH_CLOSED,
+      pinchOpen: PINCH_OPEN,
+      freqMin: FREQ_MIN,
+      freqMax: FREQ_MAX,
+      betweenClosed: BETWEEN_CLOSED,
+      betweenOpen: BETWEEN_OPEN,
+    }),
+    onSetEnd: (results) => {
+      if (game.paused) game.reset(); // results always come from a clean, unpaused state
+      cameraLost = false;
+      inSet = false;
+      phase = "playing";
+      updateSetButtons();
+      screens.results(results);
+    },
+  });
+  // The page's listeners on this engine; teardownEngine removes them.
+  const off = [engineQueue.on(() => engine?.queue === engineQueue && updateSongCard())];
+  if (kind === "yt") {
+    // The playing video failed and nothing is left to play: the load-error screen (Try again / New set).
+    off.push(engineQueue.onFailure((message) => {
+      if (engine?.queue !== engineQueue || !inSet || game.finishing) return;
+      stopSet().then(() => screens.failed(message));
+    }));
+  }
+  return { kind, deck: engineDeck, queue: engineQueue, game, embed, off };
+}
+
+// Drops an engine completely (synchronously): its set and audio stop, its players are destroyed, its game and the
+// page's listeners on it go. Nothing of it keeps running.
+function teardownEngine(old) {
+  old.off.forEach((detach) => detach());
+  old.game.destroy();
+  try { old.queue.cancelSet?.(); } catch {}
+  Promise.resolve(old.queue.endSet?.(0)).catch(() => {}); // the queue's timers and fades end
+  try { old.deck.stopSource?.(); } catch {}
+  if (old.embed) {
+    old.embed.stop();
+    old.embed.destroy(); // the YouTube players
+    ytMount.replaceChildren(); // the card is rebuilt by the next YouTube set's embed
+    ytMount.hidden = true;
+  }
+  try { Promise.resolve(old.deck.ctx?.close?.()).catch(() => {}); } catch {}
+}
+
+// Switches to the engine a set needs (kept when it is already that kind). Synchronous, so the Play click that
+// calls it can still unlock audio.
+function useEngine(kind) {
+  if (engine?.kind === kind) return engine;
+  if (engine) teardownEngine(engine);
+  engine = buildEngine(kind);
+  deck = engine.deck;
+  queue = engine.queue;
+  djGame = engine.game;
+  songStatus.textContent = "Pick your songs to start.";
+  songStatus.classList.remove("error");
+  return engine;
+}
+
+// Which engine plays a set: locally always the full one; on the hosted site the full one only when every song is a
+// `hosted: true` song (the picker keeps a set to one kind), else the YouTube player.
+function engineKindFor(ids) {
+  if (!hostedSite) return "full";
+  const library = catalog.queue.getState().library;
+  return ids.length && ids.every((id) => library.find((song) => song.id === id)?.hosted === true) ? "full" : "yt";
+}
+
+// "Music credits": the attribution of the library songs that have one (CC BY asks for it). Hidden when none.
+function showCredits(songs) {
+  const lines = songs.filter((song) => typeof song.attribution === "string" && song.attribution.trim());
+  const list = $("creditsList");
+  list.replaceChildren(
+    ...lines.map((song) => {
+      const item = document.createElement("li");
+      const text = song.attribution.trim();
+      item.textContent = song.license && !text.includes(song.license) ? `${text} (${song.license})` : text;
+      return item;
+    }),
+  );
+  $("credits").hidden = !lines.length;
+}
 
 // The screens: pick your set, how to play and the camera (first time), 3-2-1, results.
 const screens = createStartScreen(stage, {
-  cancel: () => queue.cancelSet(), // New set before the set starts: stop its downloads
+  cancel: () => queue?.cancelSet(), // New set before the set starts: stop its downloads
+  config: () => loadConfig(), // the hosted site has no downloads: no "↓ download" badges or prefetch.py hint
+  // hosted: YouTube songs YouTube can't play are greyed out (a `hosted: true` song is plain audio: djStart.js skips it)
+  checkSong: catalog ? (song) => catalog.queue.isUnavailable(song.id) : undefined,
   library: async () => {
-    await queue.libraryReady();
-    return queue.getState().library;
+    let songs;
+    if (hostedSite) {
+      await catalog.queue.libraryReady();
+      songs = catalog.queue.getState().library;
+    } else {
+      // Local: a `hosted: true` song whose audio isn't in music/ can't be played here (there is nothing to download).
+      const engineForLibrary = useEngine("full");
+      await engineForLibrary.queue.libraryReady();
+      songs = engineForLibrary.queue.getState().library.filter((song) => !(song.hosted === true && song.available === false));
+    }
+    showCredits(songs);
+    return songs;
   },
   startCamera: async () => {
-    deck.ensureContext(); // inside a click, so the browser allows sound
+    deck?.ensureContext(); // inside a click, so the browser allows sound
     try {
       await ensureModel();
     } catch (error) {
@@ -888,23 +1017,26 @@ const screens = createStartScreen(stage, {
   },
   handSeen: (side) => performance.now() - sides[side].lastSeen < 300,
   loadingText: () => {
-    const download = queue.getState().downloads.find((entry) => entry.stage !== "failed");
+    const download = queue?.getState().downloads.find((entry) => entry.stage !== "failed");
     if (!download) return null;
     const song = download.title.split(" - ").slice(1).join(" - ") || download.title;
     return `Downloading ${song}${download.percent !== null ? ` ${Math.round(download.percent)}%` : "…"}`;
   },
   prepare: async (ids) => {
-    deck.ensureContext(); // the Play click
+    useEngine(engineKindFor(ids)); // the Play click: the engine this set needs (the other kind is torn down)
+    deck.ensureContext();
     djGame.reset();
+    const mine = engine;
     await queue.playSet(ids);
     try {
       await queue.readyToStart();
     } catch (cause) {
-      if (cause?.cancelled) throw cause; // left the set: not a loading failure
+      if (cause?.cancelled || engine !== mine) throw cause; // left the set: not a loading failure
       const first = queue.getState().items[0];
       const name = first ? first.title.split(" - ").slice(1).join(" - ") || first.title : "the first song";
-      // A song that downloaded but won't decode isn't a download problem.
-      const decoding = cause?.name === "EncodingError" || /decod/i.test(cause?.message || "");
+      // On the hosted site there is nothing to download: a song that fails is one that didn't load or decode.
+      // A song that downloaded but won't decode isn't a download problem either.
+      const decoding = hostedSite || cause?.name === "EncodingError" || /decod/i.test(cause?.message || "");
       const error = new Error(`Couldn't ${decoding ? "load" : "download"} ${name}${/[.!?]$/.test(name) ? "" : "."}`);
       error.detail = cause?.message || "";
       throw error;
@@ -1054,7 +1186,6 @@ function updateSongCard() {
     (dj.talking ? "🎙 On the mic…" : active.length ? `Downloading ${active.length} song${active.length > 1 ? "s" : ""}…` : idle);
   songStatus.classList.toggle("error", Boolean(status?.isError));
 }
-queue.on(updateSongCard);
 setInterval(() => checkCameraStall(), 1000);
 
 startBtn.addEventListener("click", () => ensureModel().then(startCamera, () => {}));

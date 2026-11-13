@@ -120,6 +120,25 @@ handler.send_json = lambda status, body: answers.append(status)
 handler.do_GET()
 assert answers == [403], answers
 
+# GET /api/config tells the pages what this server can do (the hosted Worker answers youtube: false).
+def get_json(path, host=LOCAL, origin=None):
+    handler = object.__new__(server.Handler)
+    handler.path = path
+    handler.headers = Message()
+    handler.headers['Host'] = host
+    if origin:
+        handler.headers['Origin'] = origin
+    answers = []
+    handler.send_json = lambda status, body: answers.append((status, body))
+    handler.do_GET()
+    return answers
+
+
+assert get_json('/api/config') == [(200, {'youtube': True, 'youtubeEmbed': False, 'hosted': False})]
+assert get_json('/api/config?x=1') == [(200, {'youtube': True, 'youtubeEmbed': False, 'hosted': False})]
+assert get_json('/api/config', host=f'evil.example:{PORT}')[0][0] == 403  # same Host check as the other API routes
+assert get_json('/api/config', origin='https://example.com')[0][0] == 403
+
 # Picks are always local: no keys, no network, the closest library songs.
 with env(GEMINI_API_KEY=None, ELEVENLABS_API_KEY=None):
     status, body = pick({'library': LIBRARY, 'count': 3, 'nowPlaying': 'A - T', 'queued': [], 'played': ['A - T']})

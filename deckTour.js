@@ -42,6 +42,15 @@ export const TOUR_STEPS = [
     enter: () => ({}), check: (s) => !!s.locked },
 ];
 
+// The steps for the hosted site, whose YouTube player has no effects or filter: the effects step is left out and
+// the basic-controls step does not mention the filter.
+export function tourStepsFor(hosted, steps = TOUR_STEPS) {
+  if (!hosted) return steps;
+  return steps
+    .filter((step) => step.id !== "fx")
+    .map((step) => (step.id === "basic" ? { ...step, hint: "🤏 ↔ 🤏", text: "Left pinch = speed, hands apart = volume. Try one." } : step));
+}
+
 export function createDeckTour({ getState, actions = {}, mount = null, storage = null, now = () => Date.now(),
   setTimer = (f, ms) => setTimeout(f, ms), render = null, steps = TOUR_STEPS, key = TOUR_KEY } = {}) {
   const total = steps.length;
