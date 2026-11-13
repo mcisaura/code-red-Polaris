@@ -7,4 +7,3 @@ music/
 dist/
 node_modules/
 .wrangler/
-public-music/

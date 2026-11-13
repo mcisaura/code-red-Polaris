@@ -197,13 +197,14 @@ on the Worker, `{ "youtube": true, "youtubeEmbed": false, "hosted": false }` fro
 **What doesn't:** YouTube downloads (`/api/youtube` and `/api/progress` answer 501), so the queue panel hides the download box,
 and AirMix has no "↓ download" badges or `prefetch.py` hint. **Two libraries on the hosted site.** `library.json`'s songs (YouTube ids) play through the embedded YouTube player, like pasted
 links: no effects. `library.public.json` lists tracks the site is allowed to host (15 EDM tracks under CC BY or CC BY-SA, each with
-the page where its licence is stated in `source`); their audio lives in the gitignored `public-music/<id>.m4a`; `npm run build` copies those files to `dist/music/<id>.m4a`, and
+the page where its licence is stated in `source`); their audio lives in `public-music/<id>.m4a` (tracked in the repository so a deploy built from GitHub has the music); `npm run build` copies those files to `dist/music/<id>.m4a`, and
 Cloudflare serves them as free static assets at `/music/<id>.m4a` (each file under 25 MiB), so effects and beat-matched blends work on them. The build writes `dist/library.json` as `library.json`'s songs unchanged
 followed by `library.public.json`'s songs with `"hosted": true`. CC BY requires credit: each song's `attribution` text is listed
 under "Music credits" in the landing page footer. Rule: only audio you have the right to publish (CC BY, CC0, your own, or
 permission) goes in `library.public.json`; never audio downloaded from the YouTube library. Local audio files live in
-`public-music/<id>.m4a` (gitignored; AAC 160k); measure beats with `node scripts/analyze-library.mjs --public`. A fresh clone must
-re-download these tracks before building: the build warns about each missing file, and that song 404s on the site (CI builds without them).
+`public-music/<id>.m4a` (tracked; AAC 160k); measure beats with `node scripts/analyze-library.mjs --public`. The build warns about
+any listed track whose file is missing, and that song then 404s on the site. Cloudflare builds and deploys the site from GitHub on every
+push to `main` (Workers Builds: build command `npm run build`, deploy command `npx wrangler deploy`).
 
 **YouTube links on the hosted site (embed only).** The hosted site never downloads, proxies or decodes YouTube audio, and needs no
 API key. In the DJ Deck queue panel, "Paste a YouTube link" accepts `youtube.com/watch?v=`, `youtu.be/`, `/shorts/` and `/embed/`
